@@ -1,0 +1,18 @@
+{
+  "name": "calf-doctor",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "node test/parse.test.mjs",
+    "build": "node scripts/build.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "esbuild": "^0.28.2",
+    "firebase": "^13.2.0"
+  },
+  "type": "module"
+}

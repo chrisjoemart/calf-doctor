@@ -1,0 +1,48 @@
+rules_version = '2';
+
+// Calf Doctor security rules.
+// Only people on the crew list (a doc in /crew named by their Gmail address, active: true)
+// can read or write anything. The owner always has admin access.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+    function email() {
+      return request.auth.token.email.lower();
+    }
+    function isOwner() {
+      return signedIn() && email() in ['chrisjoemart@gmail.com'];
+    }
+    function crewPath() {
+      return /databases/$(database)/documents/crew/$(email());
+    }
+    function isMember() {
+      return isOwner() || (signedIn() && exists(crewPath()) && get(crewPath()).data.active == true);
+    }
+    function isAdmin() {
+      return isOwner() || (isMember() && get(crewPath()).data.role == 'admin');
+    }
+
+    match /crew/{memberEmail} {
+      allow read: if isMember() || (signedIn() && memberEmail == email());
+      allow write: if isAdmin();
+    }
+
+    match /settings/{docId} {
+      allow read: if isMember();
+      allow write: if isAdmin();
+    }
+
+    match /entries/{entryId} {
+      allow read: if isMember();
+      // "Entered by" must be the person actually signed in.
+      allow create: if isMember() && request.resource.data.enteredBy == email();
+      // Crew can fix their own entries; admins can fix anyone's.
+      allow update: if isAdmin()
+        || (isMember() && resource.data.enteredBy == email() && request.resource.data.enteredBy == email());
+      allow delete: if isAdmin() || (isMember() && resource.data.enteredBy == email());
+    }
+  }
+}
