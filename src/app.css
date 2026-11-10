@@ -164,9 +164,10 @@ nav.tabs {
   position: fixed; left: 12px; right: 12px; bottom: calc(80px + env(safe-area-inset-bottom)); z-index: 20;
   max-width: 640px; margin: 0 auto; background: var(--ink); color: #fff; border-radius: 12px; padding: 14px 16px;
   display: flex; justify-content: space-between; align-items: center; gap: 10px; font-weight: 700;
-  transform: translateY(160%); transition: transform .2s; pointer-events: none;
+  transform: translateY(20px); opacity: 0; visibility: hidden; pointer-events: none;
+  transition: transform .2s, opacity .2s, visibility 0s .2s;
 }
-#toast.show { transform: none; pointer-events: auto; }
+#toast.show { transform: none; opacity: 1; visibility: visible; pointer-events: auto; transition: transform .2s, opacity .2s; }
 .toast-btn { background: #fff; color: var(--ink); border: 0; border-radius: 8px; padding: 8px 12px; font-weight: 800; }
 
 .modal-wrap { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 30; display: flex; align-items: flex-end; justify-content: center; }
@@ -175,3 +176,8 @@ nav.tabs {
 .modal .input { margin-top: 10px; }
 .modal-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
 .modal-actions .btn { flex: 1; }
+
+.notice { background: #ecfdf5; border: 2px solid #16a34a; border-radius: 10px; padding: 10px 12px; font-weight: 700; color: #14532d; }
+.center h2 { margin: 12px 0 0; }
+.center .stack .link { justify-self: center; margin-top: 4px; font-size: 17px; }
+.muted-link { color: inherit; opacity: .6; }

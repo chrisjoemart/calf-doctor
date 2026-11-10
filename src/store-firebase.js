@@ -2,12 +2,17 @@ import { initializeApp } from 'firebase/app';
 import {
   getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult,
   onAuthStateChanged, signOut as fbSignOut,
+  signInWithEmailAndPassword, createUserWithEmailAndPassword, sendEmailVerification,
+  sendPasswordResetEmail, reload,
 } from 'firebase/auth';
 import {
   initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
   collection, doc, setDoc, deleteDoc, onSnapshot, query, where, serverTimestamp,
 } from 'firebase/firestore';
 import { firebaseConfig, OWNER_EMAILS } from './config.js';
+
+// Where the links in verification and password-reset emails send people back to.
+const returnTo = () => ({ url: location.origin + location.pathname });
 
 export function createStore() {
   const app = initializeApp(firebaseConfig);
@@ -65,7 +70,8 @@ export function createStore() {
           h.onCrew && h.onCrew(crew);
         },
         (err) => {
-          if (err.code === 'permission-denied') h.onAuth && h.onAuth({ user, access: 'denied' });
+          // For the owner, a refusal means the Firestore rules aren't published, not a crew problem.
+          if (err.code === 'permission-denied') h.onAuth && h.onAuth({ user: { ...user, isOwner }, access: 'denied', reason: isOwner ? 'rules' : '' });
           else h.onError && h.onError('Could not load crew: ' + err.code);
         }
       )
@@ -102,6 +108,11 @@ export function createStore() {
           return;
         }
         user = { email: (u.email || '').toLowerCase(), name: u.displayName || u.email };
+        // Email-and-password accounts must confirm the address before they get any data.
+        if (!u.emailVerified) {
+          h.onAuth && h.onAuth({ user, access: 'verify' });
+          return;
+        }
         const isOwner = OWNER_EMAILS.includes(user.email);
         h.onAuth && h.onAuth({ user: { ...user, isOwner, isAdmin: isOwner }, access: 'checking' });
         startData(isOwner);
@@ -119,6 +130,32 @@ export function createStore() {
           throw e;
         }
       }
+    },
+    signInEmail(email, password) {
+      return signInWithEmailAndPassword(auth, email.trim().toLowerCase(), password);
+    },
+    async createAccount(email, password) {
+      const cred = await createUserWithEmailAndPassword(auth, email.trim().toLowerCase(), password);
+      await sendEmailVerification(cred.user, returnTo());
+    },
+    resendVerification() {
+      return auth.currentUser ? sendEmailVerification(auth.currentUser, returnTo()) : Promise.resolve();
+    },
+    // After the person taps the link in the email: refresh the account and, if confirmed, let them in.
+    async checkVerified() {
+      const u = auth.currentUser;
+      if (!u) return false;
+      await reload(u);
+      if (!u.emailVerified) return false;
+      await u.getIdToken(true);
+      clearSubs();
+      const isOwner = OWNER_EMAILS.includes(user.email);
+      h.onAuth && h.onAuth({ user: { ...user, isOwner, isAdmin: isOwner }, access: 'checking' });
+      startData(isOwner);
+      return true;
+    },
+    resetPassword(email) {
+      return sendPasswordResetEmail(auth, email.trim().toLowerCase(), returnTo());
     },
     signOut() {
       return fbSignOut(auth);

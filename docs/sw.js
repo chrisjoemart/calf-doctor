@@ -1,6 +1,6 @@
 // Keeps the app opening with no signal. Data sync is handled by Firestore's own offline cache.
-const CACHE = 'calf-doctor-37daf23b37';
-const SHELL = ["./","index.html","app.js?v=37daf23b37","app.css?v=37daf23b37","manifest.webmanifest","icon-192.png","icon-512.png","apple-touch-icon.png"];
+const CACHE = 'calf-doctor-a4dccfd111';
+const SHELL = ["./","index.html","app.js?v=a4dccfd111","app.css?v=a4dccfd111","manifest.webmanifest","icon-192.png","icon-512.png","apple-touch-icon.png"];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

@@ -14,6 +14,10 @@ let store;
 const state = {
   user: null,
   access: 'loading',
+  deniedReason: '',
+  authMode: 'start', // sign-in screen: 'start' | 'signin' | 'create' | 'reset'
+  authEmail: '',
+  authMsg: '',
   crew: [],
   settings: {},
   entries: [],
@@ -104,7 +108,8 @@ function captureGPS() {
 // ---------- toasts & modals ----------
 function toast(msg, action) {
   const t = document.getElementById('toast');
-  t.replaceChildren(h('span', null, msg), action ? h('button', { class: 'toast-btn', onclick: () => { t.classList.remove('show'); action.fn(); } }, action.label) : null);
+  const btn = action ? h('button', { class: 'toast-btn', onclick: () => { t.classList.remove('show'); action.fn(); } }, action.label) : null;
+  t.replaceChildren(...[h('span', null, msg), btn].filter(Boolean));
   t.classList.add('show');
   clearTimeout(toast._t);
   toast._t = setTimeout(() => t.classList.remove('show'), 4500);
@@ -159,6 +164,7 @@ function render() {
   }
   if (state.access === 'signedOut') return renderSignIn(root);
   if (state.access === 'denied') return renderDenied(root);
+  if (state.access === 'verify') return renderVerify(root);
 
   const main = h('main', { id: 'main' });
   const nav = h('nav', { class: 'tabs' },
@@ -173,6 +179,21 @@ function render() {
   ({ doctor: renderDoctor, lookup: renderLookup, reports: renderReports, more: renderMore })[state.view](main);
 }
 
+const AUTH_ERRORS = {
+  'auth/invalid-credential': 'Wrong email or password. New here? Tap "Create account" below.',
+  'auth/wrong-password': 'Wrong password. Try again, or tap "Forgot password?"',
+  'auth/user-not-found': 'No account for that email yet. Tap "Create account" below.',
+  'auth/invalid-email': "That email address doesn't look right.",
+  'auth/missing-password': 'Enter your password.',
+  'auth/weak-password': 'Pick a password with at least 6 characters.',
+  'auth/email-already-in-use': 'That email already has an account. Tap "Sign in" instead. If it\'s a Google account, use "Sign in with Google."',
+  'auth/operation-not-allowed': "Email sign-in isn't turned on yet. Use Google for now, or ask Chris.",
+  'auth/too-many-requests': 'Too many tries. Wait a few minutes and try again.',
+  'auth/network-request-failed': 'No signal. Try again when you have service.',
+  'auth/popup-blocked': 'The sign-in window was blocked. Try again.',
+};
+const authError = (e) => AUTH_ERRORS[e && e.code] || 'Sign-in failed: ' + ((e && (e.code || e.message)) || 'unknown error');
+
 function renderSignIn(root) {
   const children = [
     h('div', { class: 'logo' }, '🐄'),
@@ -183,27 +204,121 @@ function renderSignIn(root) {
     children.push(h('p', null, 'Demo: pick who you are.'),
       h('div', { class: 'stack' }, store.demoUsers.map((u) =>
         h('button', { class: 'btn big', onclick: () => store.signIn(u.email) }, `${u.name}${u.role === 'admin' ? ' (admin)' : ''}`))));
-  } else {
-    children.push(h('button', { class: 'btn big primary', onclick: async (ev) => {
-      ev.target.disabled = true;
-      try {
-        await store.signIn();
-      } catch (e) {
-        toast('Sign-in failed: ' + (e.code || e.message));
-      }
-      ev.target.disabled = false;
-    } }, 'Sign in with Google'),
-    h('p', { class: 'muted small' }, 'Use the Gmail address Christian added to the crew list.'));
+    root.replaceChildren(h('div', { class: 'center' }, children));
+    return;
   }
+
+  const mode = state.authMode;
+  const setMode = (m) => { state.authMode = m; state.authMsg = ''; render(); };
+  const msg = state.authMsg ? h('div', { class: state.authMsg.startsWith('✓') ? 'notice' : 'error' }, state.authMsg) : null;
+
+  if (mode === 'start') {
+    children.push(
+      h('div', { class: 'stack' },
+        h('button', { class: 'btn big primary', onclick: async (ev) => {
+          ev.target.disabled = true;
+          try {
+            await store.signIn();
+          } catch (e) {
+            toast(authError(e));
+          }
+          ev.target.disabled = false;
+        } }, 'Sign in with Google'),
+        h('button', { class: 'btn big', onclick: () => setMode('signin') }, 'Sign in with email')),
+      h('p', { class: 'muted small' }, 'Use the email address Christian added to the crew list.'));
+    root.replaceChildren(h('div', { class: 'center' }, children));
+    return;
+  }
+
+  const email = h('input', { class: 'input', id: 'authEmail', type: 'email', inputmode: 'email', autocomplete: 'email', autocapitalize: 'off', placeholder: 'Email address', value: state.authEmail,
+    oninput: () => { state.authEmail = email.value; } });
+  const pw = mode === 'reset' ? null : h('input', { class: 'input', id: 'authPw', type: 'password', placeholder: mode === 'create' ? 'Pick a password (6+ characters)' : 'Password',
+    autocomplete: mode === 'create' ? 'new-password' : 'current-password',
+    onkeydown: (e) => { if (e.key === 'Enter') submit(); } });
+  const btn = h('button', { class: 'btn big primary', onclick: () => submit() },
+    { signin: 'Sign in', create: 'Create account', reset: 'Email me a reset link' }[mode]);
+
+  async function submit() {
+    const addr = email.value.trim().toLowerCase();
+    state.authEmail = addr;
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(addr)) { state.authMsg = "That email address doesn't look right."; return render(); }
+    btn.disabled = true;
+    try {
+      if (mode === 'signin') await store.signInEmail(addr, pw.value);
+      else if (mode === 'create') await store.createAccount(addr, pw.value);
+      else {
+        await store.resetPassword(addr);
+        state.authMode = 'signin';
+        state.authMsg = `✓ If ${addr} has an account, a reset link is on its way. Check your email (and spam).`;
+        return render();
+      }
+    } catch (e) {
+      state.authMsg = authError(e);
+      render();
+    }
+    btn.disabled = false;
+  }
+
+  const title = { signin: 'Sign in with email', create: 'Create your account', reset: 'Reset your password' }[mode];
+  const hint = {
+    signin: null,
+    create: 'Use the email address Christian added to the crew list. We\'ll send you a link to confirm it.',
+    reset: 'We\'ll email you a link to pick a new password.',
+  }[mode];
+  const links = {
+    signin: [['New here? Create account', 'create'], ['Forgot password?', 'reset']],
+    create: [['Already have an account? Sign in', 'signin']],
+    reset: [['Back to sign in', 'signin']],
+  }[mode];
+  children.push(
+    h('h2', null, title),
+    hint ? h('p', { class: 'muted small' }, hint) : null,
+    h('div', { class: 'stack' }, msg, email, pw, btn,
+      links.map(([label, m]) => h('button', { class: 'link', onclick: () => setMode(m) }, label)),
+      h('button', { class: 'link muted-link', onclick: () => setMode('start') }, 'Back')));
   root.replaceChildren(h('div', { class: 'center' }, children));
 }
 
+function renderVerify(root) {
+  const addr = state.user ? state.user.email : 'your email';
+  const check = async (quiet) => {
+    try {
+      const ok = await store.checkVerified();
+      if (!ok && !quiet) toast("Not confirmed yet. Tap the link in the email first.");
+    } catch (e) {
+      if (!quiet) toast(authError(e));
+    }
+  };
+  root.replaceChildren(h('div', { class: 'center' },
+    h('div', { class: 'logo' }, '📧'),
+    h('h1', null, 'Check your email'),
+    h('p', null, `We sent a link to ${addr}. Tap it to confirm it's you, then come back here.`),
+    h('p', { class: 'muted small' }, 'Not there? Check the spam or junk folder.'),
+    h('div', { class: 'stack' },
+      h('button', { class: 'btn big primary', onclick: () => check(false) }, "I've tapped the link"),
+      h('button', { class: 'btn big', onclick: async () => {
+        try { await store.resendVerification(); toast('Sent again. Check your email.'); } catch (e) { toast(authError(e)); }
+      } }, 'Send the email again'),
+      h('button', { class: 'link', onclick: () => store.signOut() }, 'Use a different account'))));
+  verifyCheck = () => check(true);
+}
+let verifyCheck = null;
+
 function renderDenied(root) {
+  if (state.deniedReason === 'rules') {
+    root.replaceChildren(h('div', { class: 'center' },
+      h('div', { class: 'logo' }, '⚙️'),
+      h('h1', null, 'Database is locked'),
+      h('p', null, "You're the owner, but Firestore refused to load. The security rules probably aren't published yet."),
+      h('p', { class: 'muted' }, 'Firebase console → Firestore Database → Rules: paste firestore.rules from the repo and tap Publish. Then reload.'),
+      h('button', { class: 'btn big', onclick: () => location.reload() }, 'Reload')));
+    return;
+  }
   root.replaceChildren(h('div', { class: 'center' },
     h('div', { class: 'logo' }, '🔒'),
     h('h1', null, 'Not on the crew list yet'),
     h('p', null, `${state.user ? state.user.email : 'This account'} isn't on the crew list.`),
-    h('p', { class: 'muted' }, 'Ask Christian to add this Gmail address, then open the app again.'),
+    h('p', { class: 'muted' }, 'Ask Christian to add this email address, then open the app again.'),
     h('button', { class: 'btn big', onclick: () => store.signOut() }, 'Use a different account')));
 }
 
@@ -717,7 +832,7 @@ function renderMore(main) {
 function renderCrew() {
   const admin = isAdmin();
   const list = [...state.crew].sort((a, b) => (a.name || a.email).localeCompare(b.name || b.email));
-  const email = h('input', { class: 'input', type: 'email', placeholder: 'Gmail address', autocomplete: 'off' });
+  const email = h('input', { class: 'input', type: 'email', placeholder: 'Email address', autocomplete: 'off', autocapitalize: 'off' });
   const name = h('input', { class: 'input', placeholder: 'Name (what the crew calls him)', autocomplete: 'off' });
   const role = h('select', { class: 'input' }, h('option', { value: 'cowboy' }, 'Cowboy'), h('option', { value: 'admin' }, 'Admin (manages crew & settings)'));
   return h('section', { class: 'card' },
@@ -791,6 +906,10 @@ export function boot(createStore) {
   store = createStore();
   window.addEventListener('online', () => { state.online = true; render(); });
   window.addEventListener('offline', () => { state.online = false; render(); });
+  // Coming back from the email app after tapping the confirm link: check automatically.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && state.access === 'verify' && verifyCheck) verifyCheck();
+  });
   window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installPrompt = e; });
   let renderQueued = false;
   const queue = () => {
@@ -813,10 +932,13 @@ export function boot(createStore) {
     });
   };
   store.start({
-    onAuth: ({ user, access }) => {
+    onAuth: ({ user, access, reason }) => {
       const changed = state.access !== access || (state.user && state.user.email) !== (user && user.email);
       state.user = user;
       state.access = access;
+      state.deniedReason = reason || '';
+      if (access !== 'verify') verifyCheck = null;
+      if (access === 'signedOut' && changed) { state.authMode = 'start'; state.authMsg = ''; }
       if (changed) {
         state.form = null;
         if (access === 'ok') captureGPS();

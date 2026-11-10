@@ -1,10 +1,10 @@
 # Calf Doctor
 
-Doctoring log for Christian Peterson's crew. Cowboys sign in with Gmail, log pulls at the chute by voice or by tapping, and the app checks the treatment protocol and builds per-cowboy reports.
+Doctoring log for Christian Peterson's crew. Cowboys sign in with Google or with any email address and a password, log pulls at the chute by voice or by tapping, and the app checks the treatment protocol and builds per-cowboy reports.
 
 - Works on iPhone and Android in the browser, and installs to the home screen.
 - Works offline: entries save on the phone and sync when signal comes back.
-- Data lives in Google Firebase (Firestore). Sign-in is Google (Gmail) only.
+- Data lives in Google Firebase (Firestore). Sign-in is Google, or email + password for any other address (the address must be confirmed by email before the account sees any data).
 
 ## Layout
 
@@ -28,7 +28,7 @@ npm run build
 
 ## One-time setup
 
-1. Firebase project with Google sign-in enabled and `<username>.github.io` added under Authentication → Settings → Authorized domains.
+1. Firebase project with the Google and Email/Password sign-in providers enabled and `<username>.github.io` added under Authentication → Settings → Authorized domains.
 2. Firestore database in production mode; paste `firestore.rules` into the Rules tab and Publish.
 3. Put the web app's `firebaseConfig` in `src/config.js`, build, push.
 4. GitHub repo → Settings → Pages → Deploy from branch `main`, folder `/docs`.
@@ -36,7 +36,7 @@ npm run build
 
 ## Data model
 
-- `crew/{gmail}`: `{ name, role: 'admin' | 'cowboy', active }`
+- `crew/{email}`: `{ name, role: 'admin' | 'cowboy', active }`
 - `settings/main`: `{ season, locations[], tagColors[{color, year}], extraAliases{nickname: treatment} }`
 - `entries/{id}`: one pull or death: tag (year + color + number), diagnosis, temperature, treatment or cause, pulled by, entered by, location, GPS, time, protocol warnings shown.
 
