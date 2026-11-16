@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { parseUtterance, isYes, isNo } from '../src/voice.js';
 import { analyze } from '../src/protocol.js';
-import { computeReport } from '../src/reports.js';
-import { normalizeTemp, milesBetween } from '../src/util.js';
+import { computeReport, buildIndex } from '../src/reports.js';
+import { normalizeTemp, milesBetween, tagKey, tagLabel } from '../src/util.js';
 
 const crew = [{ email: 'jake@x', name: 'Jake' }, { email: 'wyatt@x', name: 'Wyatt Smith' }];
 const ctx = {
@@ -128,6 +128,18 @@ check('report counts', () => {
   assert.equal(r.cowboys.get('jake').repulls, 1);
   assert.equal(r.cowboys.get('jake').deaths, 1);
   assert.equal(r.cowboys.get('wyatt').cntLaterTreated, 1);
+});
+
+check('old color entries match new number-only entries', () => {
+  const old = { id: 1, season: 2026, tagYear: 2026, tagColor: 'blue', tagNum: '42', tagKey: '2026-blue-42', kind: 'pull', at: 1 };
+  const neu = { id: 2, season: 2026, tagNum: '42', tagKey: tagKey(2026, '042'), kind: 'pull', at: 2 };
+  const nt = { id: 3, season: 2026, noTag: true, tagNum: '', tagKey: 'notag-3', kind: 'pull', at: 3 };
+  const idx = buildIndex([old, neu, nt]);
+  assert.equal(idx.get(tagKey(2026, 42)).length, 2);
+  assert.equal(idx.get('notag-3').length, 1);
+  assert.equal(tagLabel(old), 'Blue 42');
+  assert.equal(tagLabel(neu), 'Tag 42');
+  assert.equal(tagLabel({ ...neu, tagColor: 'white' }), 'White 42');
 });
 
 console.log(failed ? `\n${failed} FAILED` : '\nall passed');

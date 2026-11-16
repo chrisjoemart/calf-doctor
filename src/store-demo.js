@@ -4,7 +4,7 @@ import { HR_STEPS, CNT } from './constants.js';
 import { hrIndex } from './protocol.js';
 import { idbPut, idbGet, idbDel, KEEP_STORE } from './media.js';
 
-const KEY = 'calfdoctor-demo-v2';
+const KEY = 'calfdoctor-demo-v3';
 
 const CREW = [
   { email: 'christian@example.com', name: 'Christian Peterson', role: 'admin', active: true },
@@ -21,6 +21,7 @@ function seed() {
     season,
     locations: ['Home chute', 'North pens', 'River lot', 'East pasture'],
     herds: ['Pairs', 'Heifers', 'Yearlings'],
+    seasonColor: 'white',
     dosages: {},
     tagColors: [{ color: 'blue', year: season }, { color: 'green', year: season - 1 }],
     extraAliases: {},
@@ -43,14 +44,12 @@ function seed() {
       const prevKeys = [...history.keys()];
       const again = prevKeys.length && rnd() < 0.12 ? history.get(pick(prevKeys))[0] : null;
       const num = again ? Number(again.tagNum) : 1 + Math.floor(rnd() * 900);
-      const color = again ? again.tagColor : rnd() < 0.92 ? 'blue' : 'green';
-      const year = color === 'blue' ? season : season - 1;
-      const key = tagKey(year, color, num);
+      const key = tagKey(season, num);
       const prev = history.get(key) || [];
       if (prev.some((p) => p.kind === 'death')) continue;
       const at = today - d * 86400000 + (7 + rnd() * 9) * 3600000;
       const loc = pick(settings.locations);
-      const base = { id: uid() + i, season, tagYear: year, tagColor: color, tagNum: String(num), tagKey: key,
+      const base = { id: uid() + i, season, tagColor: 'white', tagNum: String(num), tagKey: key,
         pulledBy: cb.email, enteredBy: rnd() < 0.7 ? cb.email : 'christian@example.com', location: loc, at, notes: '', warnings: [], override: false };
       let e;
       if (rnd() < 0.025) {

@@ -67,14 +67,21 @@ export function lsSet(key, value) {
   }
 }
 
-export function tagKey(year, color, num) {
-  return `${year}-${color}-${String(num).replace(/^0+(?=\d)/, '')}`;
+// A calf is its tag number within a season. Each season has one tag color, set by an
+// admin, and every entry saves it. Older entries from when cowboys picked a color are
+// matched by number too.
+export const cleanTagNum = (num) => String(num).replace(/^0+(?=\d)/, '');
+export function tagKey(season, num) {
+  return `${season}-n${cleanTagNum(num)}`;
+}
+export function keyOf(e) {
+  if (e.noTag || !e.tagNum || !e.season) return e.tagKey;
+  return tagKey(e.season, e.tagNum);
 }
 
-export function tagLabel(e, season) {
+export function tagLabel(e) {
   if (e.noTag) return 'No tag';
-  const base = `${cap(e.tagColor)} ${e.tagNum}`;
-  return e.tagYear && season && Number(e.tagYear) !== Number(season) ? `${base} ('${String(e.tagYear).slice(2)})` : base;
+  return e.tagColor ? `${cap(e.tagColor)} ${e.tagNum}` : `Tag ${e.tagNum}`;
 }
 
 // Temperature shortcuts for fast typing or talking:

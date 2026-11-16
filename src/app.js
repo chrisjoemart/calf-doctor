@@ -1,16 +1,16 @@
 import {
-  DIAGNOSES, TREATMENTS, DOSED_TREATMENTS, CAUSES, CNT, TEMP_THRESHOLD, DEFAULT_COLORS, COLOR_HEX, MOVED_WARN_MILES,
+  DIAGNOSES, TREATMENTS, DOSED_TREATMENTS, CAUSES, CNT, TEMP_THRESHOLD, MOVED_WARN_MILES, COLOR_HEX,
 } from './constants.js';
 import {
   h, uid, cap, fmtWhen, fmtDay, startOfDay, dayKey, pct, lsGet, lsSet, tagKey, tagLabel, normalizeTemp,
-  noTagKey, milesBetween, isIOS, isStandalone,
+  noTagKey, milesBetween, isIOS, isStandalone, cleanTagNum,
 } from './util.js';
 import { parseUtterance, listen, speechSupported, isYes, isNo } from './voice.js';
 import { analyze } from './protocol.js';
 import { buildIndex, computeReport, rangeFor, toCSV } from './reports.js';
 import { prepareFiles, createUploader } from './media.js';
 
-const VERSION = '0.3.0';
+const VERSION = '0.4.0';
 
 let store;
 const state = {
@@ -83,12 +83,10 @@ function nameOf(email) {
   return email.split('@')[0];
 }
 
-function seasonColors() {
-  const tc = Array.isArray(state.settings.tagColors) ? state.settings.tagColors.filter((t) => t && t.color) : [];
-  if (tc.length) return tc.map((t) => ({ color: t.color.toLowerCase(), year: Number(t.year) || season() }));
-  return DEFAULT_COLORS.map((c) => ({ color: c, year: season() }));
-}
-const yearForColor = (color) => (seasonColors().find((c) => c.color === color) || { year: season() }).year;
+
+// One tag color per season, set by an admin.
+const seasonColor = () => String(state.settings.seasonColor || '').toLowerCase();
+const colorSwatch = (c) => h('span', { class: 'swatch', style: { background: COLOR_HEX[c] || '#999' } });
 
 const pastures = () => (Array.isArray(state.settings.locations) ? state.settings.locations : []);
 const herds = () => (Array.isArray(state.settings.herds) ? state.settings.herds : []);
@@ -109,7 +107,6 @@ function defaultPulledBy() {
 
 function blankForm(keepColor) {
   return {
-    tagColor: keepColor || (seasonColors()[0] || {}).color || 'blue',
     tagNum: '', noTag: false, diagnosis: '', temp: '', treatment: '', cause: '', notes: '', herd: '',
     pulledBy: defaultPulledBy(), files: [], media: [],
   };
@@ -450,7 +447,7 @@ function renderDoctor(main) {
 
   // Voice
   const heard = h('p', { class: 'heard', id: 'heard' }, state.listening ? 'Listening…' : '');
-  const say = h('input', { class: 'input', id: 'say', placeholder: browserVoice() ? 'Or type: blue 42 4.2 drax' : 'Tap here, then the 🎤 on your keyboard', autocomplete: 'off', enterkeyhint: 'done',
+  const say = h('input', { class: 'input', id: 'say', placeholder: browserVoice() ? 'Or type: 42 4.2 drax' : 'Tap here, then the 🎤 on your keyboard', autocomplete: 'off', enterkeyhint: 'done',
     onkeydown: (e) => { if (e.key === 'Enter') { applyUtterance(say.value, false); say.value = ''; say.blur(); } } });
   main.append(h('section', { class: 'card voice' },
     browserVoice()
@@ -460,22 +457,19 @@ function renderDoctor(main) {
       : h('p', { class: 'small voice-help' }, 'To talk: tap the box below, tap the ', h('strong', null, '🎤'), ' on your keyboard, say it, then tap ', h('strong', null, 'Fill'), '.'),
     heard,
     h('div', { class: 'row' }, say, h('button', { class: 'btn', onclick: () => { applyUtterance(say.value, false); say.value = ''; } }, 'Fill')),
-    h('p', { class: 'muted small say-hint' }, 'Any order: tag, temp, drug, diagnosis, pasture. "4.2" means 104.2. Say "no tag" for an untagged calf.'),
+    h('p', { class: 'muted small say-hint' }, 'Any order: tag number, temp, drug, diagnosis, pasture. "4.2" means 104.2. Say "no tag" for an untagged calf.'),
     state.confirmMode ? h('div', { class: 'confirm-bar' }, 'Check it below. ', browserVoice() ? 'Say "yes" or tap Save.' : 'Then tap Save.') : null));
 
   // Tag
   const num = h('input', { class: 'input tagnum', id: 'tagNum', inputmode: 'numeric', pattern: '[0-9]*', autocomplete: 'off', placeholder: 'Tag #', value: f.tagNum,
     oninput: () => { num.value = num.value.replace(/\D/g, ''); f.tagNum = num.value; updateTagPanel(); } });
   main.append(h('section', { class: 'card' },
-    h('div', { class: 'lbl-row' }, h('label', { class: 'lbl' }, 'Tag'),
+    h('div', { class: 'lbl-row' }, h('label', { class: 'lbl' }, 'Tag',
+      seasonColor() && !f.noTag ? h('span', { class: 'season-color' }, colorSwatch(seasonColor()), `${cap(seasonColor())} · ${season()}`) : null),
       h('button', { class: 'chip notag' + (f.noTag ? ' on' : ''), onclick: () => { f.noTag = !f.noTag; if (f.noTag) f.tagNum = ''; render(); } }, f.noTag ? '✓ No tag' : 'No tag')),
     f.noTag
       ? h('p', { class: 'muted' }, 'Saving without a tag. This calf won\'t show up in tag lookup or repull counts.')
-      : [h('div', { class: 'chips colors' }, seasonColors().map(({ color, year }) =>
-        h('button', { class: 'chip color' + (f.tagColor === color ? ' on' : ''), onclick: () => { f.tagColor = color; render(); } },
-          h('span', { class: 'swatch', style: { background: COLOR_HEX[color] || '#999' } }),
-          cap(color), year !== season() ? h('small', null, ` '${String(year).slice(2)}`) : null))),
-      num],
+      : num,
     h('div', { id: 'tagPanel' })));
 
   // Diagnosis
@@ -522,7 +516,7 @@ function renderDoctor(main) {
     h('button', { class: 'btn save' + (state.practice && !editing ? ' practice' : ''), onclick: () => save() },
       h('span', null, editing ? 'Save changes' : state.practice ? 'Save practice' : 'Save'), where ? h('span', { class: 'save-sub' }, where) : null),
     editing && canEdit(editing) ? h('button', { class: 'btn danger', onclick: () => deleteEntry(editing) }, 'Delete') : null,
-    !editing ? h('button', { class: 'btn ghost', onclick: () => { state.form = blankForm(f.tagColor); state.confirmMode = false; render(); } }, 'Clear') : null));
+    !editing ? h('button', { class: 'btn ghost', onclick: () => { state.form = blankForm(); state.confirmMode = false; render(); } }, 'Clear') : null));
 
   main.append(h('section', { class: 'card', id: 'recent' }));
   updateRecent();
@@ -626,8 +620,8 @@ function showEntry(e) {
 
 function currentKey() {
   const f = state.form;
-  if (!f || f.noTag || !f.tagColor || !f.tagNum) return null;
-  return tagKey(yearForColor(f.tagColor), f.tagColor, f.tagNum);
+  if (!f || f.noTag || !f.tagNum) return null;
+  return tagKey(state.editingId ? (state.entries.find((e) => e.id === state.editingId) || {}).season || season() : season(), f.tagNum);
 }
 
 function currentAnalysis() {
@@ -675,7 +669,6 @@ function updateTagPanel() {
 
 function validate(f) {
   const errs = [];
-  if (!f.noTag && !f.tagColor) errs.push('Pick a tag color.');
   if (!f.noTag && !f.tagNum) errs.push('Enter the tag number, or tap "No tag".');
   if (formKind(f) === 'death') {
     if (!f.cause) errs.push('Pick a cause of death.');
@@ -718,7 +711,6 @@ function save(opts = {}) {
   const kind = formKind(f);
   const t = normalizeTemp(f.temp);
   const id = editing ? editing.id : uid();
-  const year = f.noTag ? null : yearForColor(f.tagColor);
   const treatment = kind === 'death' ? '' : f.treatment;
   const keepDose = editing && editing.treatment === treatment;
   const entry = {
@@ -726,10 +718,9 @@ function save(opts = {}) {
     id,
     season: editing ? editing.season : season(),
     noTag: !!f.noTag,
-    tagYear: year,
-    tagColor: f.noTag ? '' : f.tagColor,
-    tagNum: f.noTag ? '' : f.tagNum.replace(/^0+(?=\d)/, ''),
-    tagKey: f.noTag ? noTagKey(id) : tagKey(year, f.tagColor, f.tagNum),
+    tagColor: f.noTag ? '' : editing ? editing.tagColor || '' : seasonColor(),
+    tagNum: f.noTag ? '' : cleanTagNum(f.tagNum),
+    tagKey: f.noTag ? noTagKey(id) : tagKey(editing ? editing.season : season(), f.tagNum),
     kind,
     diagnosis: f.diagnosis || '',
     temp: kind === 'death' ? (Number.isFinite(t) ? t : null) : t,
@@ -767,7 +758,7 @@ function save(opts = {}) {
   state.lastSaved = { id, summary: summary + (!state.online && store.mode !== 'demo' ? ' (will sync)' : ''), at: Date.now() };
   state.editingId = null;
   state.confirmMode = false;
-  state.form = blankForm(f.tagColor);
+  state.form = blankForm();
   captureGPS();
   render();
   window.scrollTo(0, 0);
@@ -779,7 +770,7 @@ function startEdit(e) {
   state.view = 'doctor';
   state.editingId = e.id;
   state.form = {
-    tagColor: e.tagColor || (seasonColors()[0] || {}).color, tagNum: e.tagNum || '', noTag: !!e.noTag,
+    tagNum: e.tagNum || '', noTag: !!e.noTag,
     diagnosis: e.kind === 'death' ? 'Death' : e.diagnosis || '',
     temp: e.temp === null || e.temp === undefined ? '' : String(e.temp), treatment: e.treatment || '', cause: e.cause || '',
     notes: e.notes || '', pulledBy: e.pulledBy, herd: e.herd || '', files: [],
@@ -790,7 +781,7 @@ function startEdit(e) {
 
 function cancelEdit() {
   state.editingId = null;
-  state.form = blankForm(state.form && state.form.tagColor);
+  state.form = blankForm();
   render();
 }
 
@@ -799,7 +790,7 @@ function deleteEntry(e) {
     { label: 'Delete', kind: 'danger', fn: () => {
       removeEntry(e).catch((err) => toast('Couldn\'t delete: ' + (err.code || err.message)));
       state.editingId = null;
-      state.form = blankForm(e.tagColor);
+      state.form = blankForm();
       toast('Entry deleted');
       render();
     } },
@@ -809,7 +800,6 @@ function deleteEntry(e) {
 // ---------- voice ----------
 function voiceCtx() {
   return {
-    colors: seasonColors().map((c) => c.color),
     crew: activeCrew(),
     extraTreatmentAliases: state.settings.extraAliases || {},
     locations: pastures(),
@@ -822,7 +812,6 @@ function applyUtterance(text, fromVoice) {
   const f = state.form || (state.form = blankForm());
   const p = parseUtterance(text, voiceCtx());
   if (p.noTag) { f.noTag = true; f.tagNum = ''; }
-  if (p.tagColor) f.tagColor = p.tagColor;
   if (p.tagNum) { f.tagNum = p.tagNum; f.noTag = false; }
   if (p.isDeath) {
     f.diagnosis = 'Death';
@@ -837,7 +826,7 @@ function applyUtterance(text, fromVoice) {
   if (p.notes) f.notes = f.notes ? f.notes + '; ' + p.notes : p.notes;
   if (p.location && !state.editingId) setLocation(p.location);
   const got = [
-    p.noTag ? 'No tag' : p.tagColor && p.tagNum ? `${cap(p.tagColor)} ${p.tagNum}` : p.tagNum ? `Tag ${p.tagNum}` : '',
+    p.noTag ? 'No tag' : p.tagNum ? (seasonColor() ? `${cap(seasonColor())} ${p.tagNum}` : `Tag ${p.tagNum}`) : '',
     p.temp !== null ? p.temp + '°' : '',
     p.treatment + (p.autoCNT ? ` (under ${TEMP_THRESHOLD}°)` : ''),
     p.diagnosis, p.cause, p.herd ? 'Herd: ' + p.herd : '',
@@ -885,7 +874,7 @@ function listenForConfirm() {
       if (isYes(t) && !isNo(t)) {
         if (!save()) render();
       } else if (isNo(t)) {
-        state.form = blankForm(state.form.tagColor);
+        state.form = blankForm();
         state.confirmMode = false;
         render();
         toast('Cleared');
@@ -905,15 +894,12 @@ function stopVoice() {
 // ---------- lookup ----------
 function renderLookup(main) {
   const L = state.lookup;
-  if (!L.color) L.color = (seasonColors()[0] || {}).color;
   const results = h('div', { id: 'lookupResults' });
   const num = h('input', { class: 'input tagnum', inputmode: 'numeric', pattern: '[0-9]*', placeholder: 'Tag #', value: L.num,
     oninput: () => { num.value = num.value.replace(/\D/g, ''); L.num = num.value; drawLookup(results); } });
   main.append(h('section', { class: 'card' },
-    h('label', { class: 'lbl' }, 'Look up a tag'),
-    h('div', { class: 'chips colors' }, seasonColors().map(({ color, year }) =>
-      h('button', { class: 'chip color' + (L.color === color ? ' on' : ''), onclick: () => { L.color = color; render(); } },
-        h('span', { class: 'swatch', style: { background: COLOR_HEX[color] || '#999' } }), cap(color), year !== season() ? h('small', null, ` '${String(year).slice(2)}`) : null))),
+    h('label', { class: 'lbl' }, 'Look up a tag',
+      seasonColor() ? h('span', { class: 'season-color' }, colorSwatch(seasonColor()), `${cap(seasonColor())} · ${season()}`) : null),
     num), results);
   drawLookup(results);
 
@@ -924,7 +910,7 @@ function renderLookup(main) {
     h('label', { class: 'lbl' }, `Pulled 2+ times (${multi.length})`),
     multi.length ? h('div', { class: 'list' }, multi.map((l) => {
       const last = l[l.length - 1];
-      return h('button', { class: 'entry', onclick: () => { L.color = last.tagColor; L.num = last.tagNum; render(); window.scrollTo(0, 0); } },
+      return h('button', { class: 'entry', onclick: () => { L.num = last.tagNum; render(); window.scrollTo(0, 0); } },
         h('div', { class: 'entry-top' }, h('strong', null, tagLabel(last, season())), h('span', { class: 'muted small' }, `${l.filter((e) => e.kind === 'pull').length} pulls`)),
         h('div', { class: 'muted small' }, `Last: ${fmtWhen(last.at)} · ${last.treatment || last.cause || ''}`));
     })) : h('p', { class: 'muted' }, 'None yet.')));
@@ -933,9 +919,9 @@ function renderLookup(main) {
 function drawLookup(el) {
   const L = state.lookup;
   if (!L.num) return el.replaceChildren();
-  const key = tagKey(yearForColor(L.color), L.color, L.num);
+  const key = tagKey(season(), L.num);
   const list = (state.byTag.get(key) || []).slice().sort((a, b) => b.at - a.at);
-  if (!list.length) return el.replaceChildren(h('section', { class: 'card' }, h('p', null, `No entries for ${cap(L.color)} ${L.num} this season.`)));
+  if (!list.length) return el.replaceChildren(h('section', { class: 'card' }, h('p', null, `No entries for ${seasonColor() ? cap(seasonColor()) : 'tag'} ${L.num} this season.`)));
   const pulls = list.filter((e) => e.kind === 'pull');
   const dead = list.find((e) => e.kind === 'death');
   el.replaceChildren(h('section', { class: 'card' },
@@ -1166,31 +1152,30 @@ function editCrew(c) {
 function renderSettings() {
   const s = state.settings;
   const seasonIn = h('input', { class: 'input', inputmode: 'numeric', value: String(season()) });
+  const colorSel = h('select', { class: 'input' },
+    h('option', { value: '' }, 'Pick a color…'),
+    Object.keys(COLOR_HEX).map((c) => h('option', { value: c, selected: c === seasonColor() }, cap(c))));
   const locs = h('textarea', { class: 'input', rows: 5, placeholder: 'One per line' });
   locs.value = (s.locations || []).join('\n');
   const herdsIn = h('textarea', { class: 'input', rows: 4, placeholder: 'One per line, e.g.\nPairs\nHeifers' });
   herdsIn.value = (s.herds || []).join('\n');
   const doseIns = DOSED_TREATMENTS.map((t) => [t, h('input', { class: 'input dose-in', placeholder: 'e.g. 1.1 mL per 100 lb, under the skin', value: (s.dosages || {})[t] || '' })]);
-  const colors = h('textarea', { class: 'input', rows: 4, placeholder: 'blue 2026\ngreen 2025' });
-  colors.value = seasonColors().filter(() => (s.tagColors || []).length).map((c) => `${c.color} ${c.year}`).join('\n');
   const aliases = h('textarea', { class: 'input', rows: 4, placeholder: 'drax = HR1 Draxxin\nthe blue stuff = LR1 Bio-Mycin' });
   aliases.value = Object.entries(s.extraAliases || {}).map(([k, v]) => `${k} = ${v}`).join('\n');
   return h('section', { class: 'card' },
     h('label', { class: 'lbl' }, 'Settings (admins)'),
     h('label', { class: 'lbl' }, 'Season'), seasonIn,
+    h('label', { class: 'lbl' }, 'Tag color this season'), colorSel,
+    h('p', { class: 'muted small' }, 'Every calf tagged this season gets this color. Cowboys don\'t pick it. Change it when a new season starts.'),
     h('label', { class: 'lbl' }, 'Pastures'), locs,
     h('p', { class: 'muted small' }, 'Cowboys pick these, or say the name into the mic.'),
     h('label', { class: 'lbl' }, 'Herds (for death reports)'), herdsIn,
     h('label', { class: 'lbl' }, 'Doses'),
     h('p', { class: 'muted small' }, 'Cowboys see the dose when they pick a drug, and in the dosage chart. They can\'t change it.'),
     h('div', { class: 'dose-grid' }, doseIns.map(([t, inp]) => h('label', { class: 'dose-row' }, h('span', null, t), inp))),
-    h('label', { class: 'lbl' }, 'Tag colors and their year'), colors,
-    h('p', { class: 'muted small' }, 'One per line, e.g. "blue 2026". Leave empty to show all common colors.'),
     h('label', { class: 'lbl' }, 'Drug nicknames for voice'), aliases,
     h('p', { class: 'muted small' }, `One per line: nickname = treatment. Treatments: ${TREATMENTS.join(', ')}.`),
     h('button', { class: 'btn primary', onclick: () => {
-      const tagColors = colors.value.split('\n').map((l) => l.trim().toLowerCase().split(/\s+/)).filter((p) => p[0])
-        .map(([color, year]) => ({ color, year: Number(year) || Number(seasonIn.value) || season() }));
       const extraAliases = {};
       const bad = [];
       for (const line of aliases.value.split('\n')) {
@@ -1202,10 +1187,11 @@ function renderSettings() {
       }
       store.saveSettings({
         season: Number(seasonIn.value) || season(),
+        seasonColor: colorSel.value,
         locations: locs.value.split('\n').map((l) => l.trim()).filter(Boolean),
         herds: herdsIn.value.split('\n').map((l) => l.trim()).filter(Boolean),
         dosages: Object.fromEntries(doseIns.map(([t, inp]) => [t, inp.value.trim()]).filter(([, v]) => v)),
-        tagColors,
+        tagColors: s.tagColors || [],
         extraAliases,
       });
       toast(bad.length ? `Saved. Couldn't match: ${bad.join('; ')}` : 'Settings saved');

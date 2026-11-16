@@ -1,5 +1,5 @@
 import { CNT, PREDATOR_CAUSES } from './constants.js';
-import { dayKey, startOfDay } from './util.js';
+import { keyOf, dayKey, startOfDay } from './util.js';
 
 // DRAFT definitions (to confirm with Christian):
 //  - Treated pull: any pull whose treatment isn't Check No Treatment.
@@ -13,8 +13,9 @@ import { dayKey, startOfDay } from './util.js';
 export function buildIndex(entries) {
   const byTag = new Map();
   for (const e of entries) {
-    if (!byTag.has(e.tagKey)) byTag.set(e.tagKey, []);
-    byTag.get(e.tagKey).push(e);
+    const k = keyOf(e);
+    if (!byTag.has(k)) byTag.set(k, []);
+    byTag.get(k).push(e);
   }
   for (const list of byTag.values()) list.sort((a, b) => a.at - b.at);
   return byTag;
@@ -97,7 +98,8 @@ export function toCSV(entries, nameOf) {
   const cols = [
     ['Date', (e) => new Date(e.at).toLocaleDateString()],
     ['Time', (e) => new Date(e.at).toLocaleTimeString()],
-    ['Tag', (e) => (e.noTag ? 'No tag' : `${e.tagYear} ${e.tagColor} ${e.tagNum}`)],
+    ['Tag', (e) => (e.noTag ? 'No tag' : e.tagNum)],
+    ['Tag color', (e) => e.tagColor || ''],
     ['Type', (e) => (e.kind === 'death' ? 'Death' : 'Pull')],
     ['Diagnosis', (e) => e.diagnosis || ''],
     ['Temperature', (e) => (e.temp ?? '')],
