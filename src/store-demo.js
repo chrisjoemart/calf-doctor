@@ -1,8 +1,10 @@
 // Demo mode: same interface as the Firebase store, data kept on this device only.
 import { lsGet, lsSet, uid, tagKey, startOfDay } from './util.js';
-import { HR, CNT } from './constants.js';
+import { HR_STEPS, CNT } from './constants.js';
+import { hrIndex } from './protocol.js';
+import { idbPut, idbGet, KEEP_STORE } from './media.js';
 
-const KEY = 'calfdoctor-demo-v1';
+const KEY = 'calfdoctor-demo-v2';
 
 const CREW = [
   { email: 'christian@example.com', name: 'Christian Peterson', role: 'admin', active: true },
@@ -18,6 +20,8 @@ function seed() {
   const settings = {
     season,
     locations: ['Home chute', 'North pens', 'River lot', 'East pasture'],
+    herds: ['Pairs', 'Heifers', 'Yearlings'],
+    dosages: {},
     tagColors: [{ color: 'blue', year: season }, { color: 'green', year: season - 1 }],
     extraAliases: {},
   };
@@ -50,18 +54,20 @@ function seed() {
         pulledBy: cb.email, enteredBy: rnd() < 0.7 ? cb.email : 'christian@example.com', location: loc, at, notes: '', warnings: [], override: false };
       let e;
       if (rnd() < 0.025) {
-        e = { ...base, kind: 'death', diagnosis: 'Death', cause: pick(['Wolf', 'Sickness', 'Bear', 'Sickness', 'Unknown']), temp: null, treatment: '' };
+        e = { ...base, kind: 'death', diagnosis: 'Death', cause: pick(['Wolf', 'Sickness', 'Bear', 'Sickness', 'Unknown']), temp: null, treatment: '', herd: pick(settings.herds), media: [] };
       } else {
         const diagRoll = rnd();
-        const diagnosis = diagRoll < 0.62 ? 'Respiratory' : diagRoll < 0.72 ? 'Pink Eye' : diagRoll < 0.8 ? 'Hoof Rot' : diagRoll < 0.86 ? 'Bull' : diagRoll < 0.92 ? 'Bloat' : 'Injury';
+        const diagnosis = diagRoll < 0.62 ? 'Respiratory' : diagRoll < 0.72 ? 'Pink Eye' : diagRoll < 0.8 ? 'Hoof Rot' : diagRoll < 0.86 ? 'Bull Castrated' : diagRoll < 0.9 ? 'Bloat' : diagRoll < 0.93 ? 'Brainer' : 'Injury';
         const isCnt = diagnosis === 'Respiratory' && rnd() < (cntBias[cb.email] || 0.1);
         const temp = isCnt ? Math.round((101.6 + rnd() * 1.8) * 10) / 10 : Math.round((103.6 + rnd() * 2.4) * 10) / 10;
         let treatment;
         if (isCnt) treatment = CNT;
         else if (diagnosis === 'Respiratory') {
-          const prevHR = prev.reduce((m, p) => Math.max(m, HR.indexOf(p.treatment)), -1);
-          treatment = HR[Math.min(prevHR + 1, 2)];
-        } else if (diagnosis === 'Bull') treatment = 'Castration – Bio-Mycin';
+          const prevHR = prev.reduce((m, p) => Math.max(m, hrIndex(p.treatment)), -1);
+          const step = HR_STEPS[Math.min(prevHR + 1, HR_STEPS.length - 1)];
+          treatment = pick(step);
+        } else if (diagnosis === 'Bull Castrated') treatment = 'Castration – Bio-Mycin';
+        else if (diagnosis === 'Brainer') treatment = 'Thiamine';
         else if (diagnosis === 'Bloat') treatment = 'Tube';
         else treatment = 'LR1 Bio-Mycin';
         e = { ...base, kind: 'pull', diagnosis, temp, treatment, cause: '' };
@@ -139,6 +145,15 @@ export function createStore() {
       data.crew = data.crew.filter((c) => c.email !== email);
       persist();
       emit();
+    },
+    // Demo: files stay on this device.
+    async uploadMedia(path, blob, type) {
+      await idbPut(KEEP_STORE, { path, blob, type });
+    },
+    async mediaURL(path) {
+      const it = await idbGet(KEEP_STORE, path);
+      if (!it) throw new Error('not found');
+      return URL.createObjectURL(it.blob);
     },
     async saveSettings(s) {
       data.settings = { ...data.settings, ...s };

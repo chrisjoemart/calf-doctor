@@ -72,15 +72,42 @@ export function tagKey(year, color, num) {
 }
 
 export function tagLabel(e, season) {
+  if (e.noTag) return 'No tag';
   const base = `${cap(e.tagColor)} ${e.tagNum}`;
   return e.tagYear && season && Number(e.tagYear) !== Number(season) ? `${base} ('${String(e.tagYear).slice(2)})` : base;
 }
 
-// Accept "1038" as 103.8 for fast typing with gloves.
+// Temperature shortcuts for fast typing or talking:
+//   1042 -> 104.2   4.2 -> 104.2   42 -> 104.2   4 -> 104.0
+//   9.8 -> 99.8     85 -> 98.5     104.2 stays 104.2
 export function normalizeTemp(raw) {
   if (raw === '' || raw === null || raw === undefined) return null;
-  let t = Number(String(raw).replace(',', '.'));
-  if (!Number.isFinite(t)) return NaN;
-  if (t >= 900 && t < 1100) t = t / 10;
+  const s = String(raw).trim().replace(',', '.');
+  if (s === '' || s === '.') return null;
+  let t = Number(s);
+  if (!Number.isFinite(t) || t < 0) return NaN;
+  const dot = s.includes('.');
+  if (!dot && t >= 900 && t < 1100) t = t / 10;
+  else if (t < 10) t = t < 8 ? 100 + t : 90 + t;
+  else if (!dot && t < 95) t = t < 80 ? 100 + t / 10 : 90 + t / 10;
   return Math.round(t * 10) / 10;
 }
+
+export function noTagKey(id) {
+  return `notag-${id}`;
+}
+
+// Straight-line distance in miles between two {lat, lng} points.
+export function milesBetween(a, b) {
+  const R = 3958.8;
+  const rad = (d) => (d * Math.PI) / 180;
+  const dLat = rad(b.lat - a.lat);
+  const dLng = rad(b.lng - a.lng);
+  const x = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(x));
+}
+
+export const isIOS = () => typeof navigator !== 'undefined' &&
+  (/iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
+export const isStandalone = () => typeof window !== 'undefined' &&
+  ((window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || window.navigator.standalone === true);

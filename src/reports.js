@@ -84,19 +84,22 @@ export function toCSV(entries, nameOf) {
   const cols = [
     ['Date', (e) => new Date(e.at).toLocaleDateString()],
     ['Time', (e) => new Date(e.at).toLocaleTimeString()],
-    ['Tag', (e) => `${e.tagYear} ${e.tagColor} ${e.tagNum}`],
+    ['Tag', (e) => (e.noTag ? 'No tag' : `${e.tagYear} ${e.tagColor} ${e.tagNum}`)],
     ['Type', (e) => (e.kind === 'death' ? 'Death' : 'Pull')],
     ['Diagnosis', (e) => e.diagnosis || ''],
     ['Temperature', (e) => (e.temp ?? '')],
     ['Treatment', (e) => e.treatment || ''],
+    ['Dose (at the time)', (e) => e.dose || ''],
     ['Cause of death', (e) => e.cause || ''],
+    ['Herd', (e) => e.herd || ''],
     ['Pulled by', (e) => nameOf(e.pulledBy)],
     ['Entered by', (e) => nameOf(e.enteredBy)],
-    ['Location', (e) => e.location || ''],
+    ['Pasture pulled from', (e) => e.location || ''],
     ['Latitude', (e) => (e.gps ? e.gps.lat : '')],
     ['Longitude', (e) => (e.gps ? e.gps.lng : '')],
     ['Protocol warnings', (e) => (e.warnings || []).join(' | ')],
-    ['Notes', (e) => e.notes || ''],
+    ['Notes / description', (e) => e.notes || ''],
+    ['Photos & videos', (e) => (e.media || []).length || ''],
   ];
   const q = (v) => {
     const s = String(v ?? '');

@@ -9,6 +9,7 @@ import {
   initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
   collection, doc, setDoc, deleteDoc, onSnapshot, query, where, serverTimestamp,
 } from 'firebase/firestore';
+import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { firebaseConfig, OWNER_EMAILS } from './config.js';
 
 // Where the links in verification and password-reset emails send people back to.
@@ -17,6 +18,8 @@ const returnTo = () => ({ url: location.origin + location.pathname });
 export function createStore() {
   const app = initializeApp(firebaseConfig);
   const auth = getAuth(app);
+  let storage = null;
+  const bucket = () => storage || (storage = getStorage(app));
   let db;
   try {
     db = initializeFirestore(app, {
@@ -174,6 +177,12 @@ export function createStore() {
     },
     deleteCrew(email) {
       return deleteDoc(doc(db, 'crew', email.toLowerCase()));
+    },
+    uploadMedia(path, blob, contentType) {
+      return uploadBytes(ref(bucket(), path), blob, { contentType });
+    },
+    mediaURL(path) {
+      return getDownloadURL(ref(bucket(), path));
     },
     saveSettings(s) {
       return setDoc(doc(db, 'settings', 'main'), s, { merge: true });

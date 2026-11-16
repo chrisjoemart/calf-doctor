@@ -1,34 +1,134 @@
+import assert from 'node:assert/strict';
 import { parseUtterance, isYes, isNo } from '../src/voice.js';
 import { analyze } from '../src/protocol.js';
 import { computeReport } from '../src/reports.js';
-const crew=[{email:'jake@x',name:'Jake'},{email:'wyatt@x',name:'Wyatt Smith'}];
-const ctx={colors:['blue','green'],crew};
-const cases = [
- 'blue 42 103.3',
- 'blue 42 104.1 draxxin',
- 'Blue 4951, Draxxin, 104.0',
- 'green 7 one oh four point two baytril pulled by jake',
- 'blue forty two 105 point 1 HR two respiratory',
- 'blue 42 103 3',
- 'blue 12 bull castration 102.8',
- 'blue 88 bloat tube 101.9',
- 'blue 42 dead wolf',
- 'blue 42 died sickness',
- 'blue 42 sick 104.5 drax',
- 'Blue 103 104.2 nuflor',
- 'blew 15 104 drax wyatt',
- 'pink eye blue 33 102.5 LR1',
- 'blue42 104.6 drax note limping on left front',
- 'blue 42 1038 drax',
-];
-for (const c of cases) { const p=parseUtterance(c,ctx); console.log(c.padEnd(52), '=>', JSON.stringify({c:p.tagColor,n:p.tagNum,t:p.temp,tr:p.treatment,d:p.diagnosis,cause:p.cause,death:p.isDeath,by:p.pulledBy,notes:p.notes,auto:p.autoCNT})); }
-console.log('yes', isYes('yes'), isYes('Yeah save it'), isNo('no'), isYes('no'));
-const h=[{kind:'pull',treatment:'HR1 Draxxin',at:1}];
-console.log(JSON.stringify(analyze(h,{kind:'pull',temp:104.5,treatment:'HR1 Draxxin',diagnosis:'Respiratory'})));
-console.log(JSON.stringify(analyze([],{kind:'pull',temp:103.1,treatment:'HR1 Draxxin',diagnosis:''})));
-console.log(JSON.stringify(analyze([],{kind:'pull',temp:104.1,treatment:'Check No Treatment',diagnosis:''})));
-console.log(JSON.stringify(analyze([{kind:'death',at:1}],{kind:'pull',temp:104.1,treatment:'',diagnosis:''})));
-const E=(id,tag,at,by,tr,kind='pull',cause='')=>({id,tagKey:tag,at,pulledBy:by,treatment:tr,kind,cause,location:'L'});
-const ents=[E(1,'a',1,'jake','HR1 Draxxin'),E(2,'a',2,'wyatt','HR2 Baytril'),E(3,'b',1,'wyatt','Check No Treatment'),E(4,'b',3,'jake','HR1 Draxxin'),E(5,'b',5,'','','death','Sickness'),E(6,'c',1,'jake','HR1 Draxxin'),E(7,'c',2,'','','death','Wolf')];
-const r=computeReport(ents);
-console.log([...r.cowboys.entries()].map(([k,v])=>k+':'+JSON.stringify(v)).join('\n'));
+import { normalizeTemp, milesBetween } from '../src/util.js';
+
+const crew = [{ email: 'jake@x', name: 'Jake' }, { email: 'wyatt@x', name: 'Wyatt Smith' }];
+const ctx = {
+  colors: ['blue', 'green', 'red'], crew,
+  locations: ['North Pens', 'River Lot', 'Red Hill', 'Section 12'],
+  herds: ['Heifers', 'Pairs'],
+};
+let failed = 0;
+const check = (name, fn) => {
+  try { fn(); console.log('ok  ', name); } catch (e) { failed++; console.log('FAIL', name, '\n     ', e.message); }
+};
+const P = (s) => parseUtterance(s, ctx);
+const pick = (p, keys) => Object.fromEntries(keys.map((k) => [k, p[k]]));
+const expect = (s, want) => check(s, () => assert.deepEqual(pick(P(s), Object.keys(want)), want));
+
+// --- basics (unchanged behaviour) ---
+expect('blue 42 103.3', { tagColor: 'blue', tagNum: '42', temp: 103.3, treatment: 'Check No Treatment', autoCNT: true });
+expect('blue 42 104.1 draxxin', { tagNum: '42', temp: 104.1, treatment: 'HR1 Draxxin' });
+expect('Blue 4951, Draxxin, 104.0', { tagNum: '4951', temp: 104, treatment: 'HR1 Draxxin' });
+expect('green 7 one oh four point two baytril pulled by jake', { tagColor: 'green', tagNum: '7', temp: 104.2, treatment: 'HR2 Baytril', pulledBy: 'jake@x' });
+expect('blue forty two 105 point 1 HR two respiratory', { tagNum: '42', temp: 105.1, treatment: 'HR2 Baytril', diagnosis: 'Respiratory' });
+expect('blue forty two one oh four point two drax', { tagNum: '42', temp: 104.2 });
+expect('blue 42 103 3', { tagNum: '42', temp: 103.3 });
+expect('blue 42 dead wolf', { isDeath: true, cause: 'Wolf', diagnosis: 'Death', tagNum: '42' });
+expect('blue 42 sick 104.5 drax', { isDeath: false, temp: 104.5, treatment: 'HR1 Draxxin' });
+expect('Blue 103 104.2 nuflor', { tagNum: '103', temp: 104.2, treatment: 'HR3 NuFlor' });
+expect('blew 15 104 drax wyatt', { tagNum: '15', temp: 104, pulledBy: 'wyatt@x' });
+expect('pink eye blue 33 102.5 LR1', { diagnosis: 'Pink Eye', treatment: 'LR1 Bio-Mycin', temp: 102.5 });
+expect('blue42 104.6 drax note limping on left front', { tagNum: '42', temp: 104.6, notes: 'limping on left front' });
+expect('blue 42 1038 drax', { temp: 103.8 });
+
+// --- order doesn't matter ---
+const same = { tagColor: 'blue', tagNum: '42', temp: 104.2, treatment: 'HR1 Draxxin' };
+for (const s of [
+  'blue 42 104.2 drax', 'drax blue 42 104.2', '104.2 drax blue 42', '42 blue drax 104.2',
+  'drax 104.2 42 blue', 'temp 104.2 tag 42 blue drax', 'drax temp 4.2 blue tag 42', 'blue 42 drax 4.2',
+  '104 drax blue 42 point 2'.replace('42 point 2', '42') && 'drax 104.2 blue 42',
+]) expect(s, same);
+expect('104 42 drax', { tagNum: '42', temp: 104 });
+expect('42 104 drax', { tagNum: '42', temp: 104 });
+expect('temp 103 tag 104 blue', { tagNum: '104', temp: 103 });
+
+// --- temperature shortcuts ---
+expect('blue 42 4.2 drax', { temp: 104.2 });
+expect('blue 42 four point two drax', { temp: 104.2 });
+expect('blue 42 temp 42 drax', { tagNum: '42', temp: 104.2 });
+expect('blue 7 temp 3.1', { temp: 103.1, treatment: 'Check No Treatment' });
+check('typed temps', () => {
+  assert.equal(normalizeTemp('4.2'), 104.2);
+  assert.equal(normalizeTemp('42'), 104.2);
+  assert.equal(normalizeTemp('1042'), 104.2);
+  assert.equal(normalizeTemp('104.2'), 104.2);
+  assert.equal(normalizeTemp('104'), 104);
+  assert.equal(normalizeTemp('4'), 104);
+  assert.equal(normalizeTemp('9.8'), 99.8);
+  assert.equal(normalizeTemp('85'), 98.5);
+  assert.equal(normalizeTemp('101.5'), 101.5);
+  assert.equal(normalizeTemp(''), null);
+});
+
+// --- drugs and diagnoses ---
+expect('blue 5 104.5 hr3 bio', { treatment: 'HR3 Bio-Mycin', tagNum: '5' });
+expect('blue 5 104.5 bio hr3', { treatment: 'HR3 Bio-Mycin', tagNum: '5' });
+expect('blue 5 104.5 hr three nuflor', { treatment: 'HR3 NuFlor', tagNum: '5' });
+expect('blue 5 104.5 hr3', { treatment: '', hr3Ambiguous: true, tagNum: '5' });
+expect('blue 5 102 biomycin', { treatment: 'LR1 Bio-Mycin' });
+expect('blue 9 brainer thiamine 102.1', { diagnosis: 'Brainer', treatment: 'Thiamine', tagNum: '9' });
+expect('blue 9 brainer 102.1', { diagnosis: 'Brainer', treatment: '', autoCNT: false });
+expect('blue 12 bull castrated 102.8', { diagnosis: 'Bull Castrated', treatment: 'Castration – Bio-Mycin', tagNum: '12' });
+expect('blue 12 castration 102.8', { diagnosis: 'Bull Castrated', treatment: 'Castration – Bio-Mycin' });
+expect('blue 13 bull marked 102.8', { diagnosis: 'Bull Marked', tagNum: '13' });
+expect('blue 88 bloat tube 101.9', { treatment: 'Tube', diagnosis: 'Bloat' });
+
+// --- pasture by voice, no tag, herd ---
+expect('blue 42 104.2 drax north pens', { location: 'North Pens', tagNum: '42' });
+expect('north pen blue 42 104.2 drax', { location: 'North Pens' });
+expect('red hill blue 42 104.2', { location: 'Red Hill', tagColor: 'blue' });
+expect('section twelve blue 42 104.2', { location: 'Section 12', tagNum: '42' });
+expect('blue 42 104.2 drax same pasture', { samePlace: true, location: '' });
+expect('no tag 104.2 drax', { noTag: true, tagNum: '', temp: 104.2 });
+expect('slick calf 4.5 drax', { noTag: true, tagNum: '', temp: 104.5 });
+expect('no tag dead wolf heifers', { noTag: true, isDeath: true, cause: 'Wolf', herd: 'Heifers' });
+expect('blue 42 dead bear pairs description chewed up by the creek', { herd: 'Pairs', cause: 'Bear', notes: 'chewed up by the creek' });
+
+check('yes/no', () => {
+  assert.ok(isYes('yes') && isYes('Yeah save it') && isNo('no') && !isYes('no'));
+});
+
+// --- protocol ---
+check('HR1 again suggests HR2', () => {
+  const a = analyze([{ kind: 'pull', treatment: 'HR1 Draxxin', at: 1 }], { kind: 'pull', temp: 104.5, treatment: 'HR1 Draxxin', diagnosis: 'Respiratory' });
+  assert.deepEqual(a.suggestions, ['HR2 Baytril']);
+  assert.equal(a.warnings.length, 1);
+});
+check('after HR2 suggests both HR3 drugs', () => {
+  const a = analyze([{ kind: 'pull', treatment: 'HR1 Draxxin', at: 1 }, { kind: 'pull', treatment: 'HR2 Baytril', at: 2 }], { kind: 'pull', temp: 104.5, treatment: '', diagnosis: '' });
+  assert.deepEqual(a.suggestions, ['HR3 NuFlor', 'HR3 Bio-Mycin']);
+});
+check('old combined HR3 still counts as HR3', () => {
+  const a = analyze([{ kind: 'pull', treatment: 'HR3 NuFlor / Bio-Mycin', at: 1 }], { kind: 'pull', temp: 104.5, treatment: 'HR3 NuFlor', diagnosis: '' });
+  assert.match(a.warnings[0], /already had/);
+});
+check('brainer suggests thiamine', () => {
+  assert.deepEqual(analyze([], { kind: 'pull', temp: 102, treatment: '', diagnosis: 'Brainer' }).suggestions, ['Thiamine']);
+});
+check('under 103.5 with HR1 warns', () => {
+  assert.equal(analyze([], { kind: 'pull', temp: 103.1, treatment: 'HR1 Draxxin', diagnosis: '' }).warnings.length, 1);
+});
+check('dead tag warns', () => {
+  assert.match(analyze([{ kind: 'death', at: 1 }], { kind: 'pull', temp: 104.1, treatment: '', diagnosis: '' }).warnings[0], /dead/);
+});
+
+check('distance', () => {
+  const d = milesBetween({ lat: 45, lng: -110 }, { lat: 45.005, lng: -110 });
+  assert.ok(d > 0.33 && d < 0.36, String(d));
+});
+
+// --- reports ---
+check('report counts', () => {
+  const E = (id, tag, at, by, tr, kind = 'pull', cause = '') => ({ id, tagKey: tag, at, pulledBy: by, treatment: tr, kind, cause, location: 'L' });
+  const r = computeReport([E(1, 'a', 1, 'jake', 'HR1 Draxxin'), E(2, 'a', 2, 'wyatt', 'HR2 Baytril'), E(3, 'b', 1, 'wyatt', 'Check No Treatment'),
+    E(4, 'b', 3, 'jake', 'HR1 Draxxin'), E(5, 'b', 5, '', '', 'death', 'Sickness'), E(6, 'c', 1, 'jake', 'HR1 Draxxin'), E(7, 'c', 2, '', '', 'death', 'Wolf')]);
+  assert.equal(r.cowboys.get('jake').repulls, 1);
+  assert.equal(r.cowboys.get('jake').deaths, 1);
+  assert.equal(r.cowboys.get('wyatt').cntLaterTreated, 1);
+});
+
+console.log(failed ? `\n${failed} FAILED` : '\nall passed');
+process.exit(failed ? 1 : 0);

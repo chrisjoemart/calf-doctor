@@ -1,50 +1,58 @@
 import {
-  TREATMENT_ALIASES, DIAGNOSIS_ALIASES, CAUSE_ALIASES, DEATH_WORDS, COLOR_ALIASES,
-  CNT, TEMP_THRESHOLD,
+  TREATMENT_ALIASES, DIAGNOSIS_ALIASES, CAUSE_ALIASES, DEATH_WORDS, COLOR_ALIASES, HR3_BARE,
+  NO_TAG_WORDS, SAME_PLACE_WORDS, CNT, TEMP_THRESHOLD,
 } from './constants.js';
+import { normalizeTemp } from './util.js';
 
 const ONES = {
   zero: 0, oh: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9,
+};
+const TEENS = {
   ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16,
   seventeen: 17, eighteen: 18, nineteen: 19,
 };
 const TENS = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
+const isNumWord = (w) => w in ONES || w in TEENS || w in TENS || w === 'hundred';
 
-function isNumWord(w) {
-  return w in ONES || w in TENS || w === 'hundred' || w === 'thousand';
-}
-
-// "one oh three" -> "103", "forty two" -> "42", "one hundred four" -> "104"
+// "one oh four" -> 104, "forty two" -> 42, "one hundred four" -> 104,
+// "forty two one oh four" -> 42 104 (two separate numbers).
 function numberWordsToDigits(tokens) {
   const out = [];
   let i = 0;
   while (i < tokens.length) {
     const w = tokens[i];
-    if (!isNumWord(w) || (w === 'oh' && !(i + 1 < tokens.length && isNumWord(tokens[i + 1])))) {
+    // "oh" only counts as zero next to other number words.
+    if (!isNumWord(w) || (w === 'oh' && !(isNumWord(tokens[i + 1] || '') || isNumWord(tokens[i - 1] || '')))) {
       out.push(w);
       i++;
       continue;
     }
-    const run = [];
-    while (i < tokens.length && (isNumWord(tokens[i]) || (tokens[i] === 'and' && run.length))) {
-      if (tokens[i] !== 'and') run.push(tokens[i]);
-      i++;
-    }
-    const singleDigits = run.every((r) => r in ONES && ONES[r] <= 9);
-    if (singleDigits && run.length > 1) {
-      out.push(run.map((r) => ONES[r]).join(''));
-    } else {
-      let total = 0;
-      let cur = 0;
-      for (const r of run) {
-        if (r === 'hundred') cur = (cur || 1) * 100;
-        else if (r === 'thousand') {
-          total += (cur || 1) * 1000;
-          cur = 0;
-        } else if (r in TENS) cur += TENS[r];
-        else cur += ONES[r];
+    if (w in ONES && tokens[i + 1] === 'hundred') {
+      let v = ONES[w] * 100;
+      i += 2;
+      if (tokens[i] === 'and') i++;
+      if (tokens[i] in TEENS) v += TEENS[tokens[i++]];
+      else {
+        if (tokens[i] in TENS) v += TENS[tokens[i++]];
+        if (tokens[i] in ONES && tokens[i] !== 'oh') v += ONES[tokens[i++]];
       }
-      out.push(String(total + cur));
+      out.push(String(v));
+    } else if (w in TENS) {
+      let v = TENS[w];
+      i++;
+      if (tokens[i] in ONES && ONES[tokens[i]] > 0) v += ONES[tokens[i++]];
+      out.push(String(v));
+    } else if (w in TEENS) {
+      out.push(String(TEENS[w]));
+      i++;
+    } else if (w in ONES) {
+      // a run of single digits is read digit by digit: "one oh four" -> 104
+      let d = '';
+      while (i < tokens.length && tokens[i] in ONES && tokens[i + 1] !== 'hundred') d += ONES[tokens[i++]];
+      out.push(d);
+    } else {
+      out.push(w); // stray "hundred"
+      i++;
     }
   }
   return out;
@@ -54,18 +62,45 @@ function escapeRe(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// Same clean-up the spoken text gets, so admin-entered names match what the phone hears.
+function normPhrase(str) {
+  const t = String(str || '').toLowerCase().replace(/[^a-z0-9.' ]+/g, ' ').trim().split(/\s+/).filter(Boolean);
+  return numberWordsToDigits(t).join(' ');
+}
+
 // Finds the longest alias phrase present; removes it from the text.
 function takePhrase(text, aliasMap) {
   const all = [];
   for (const [value, phrases] of Object.entries(aliasMap)) {
-    for (const p of phrases) all.push([p.toLowerCase(), value]);
+    for (const p of phrases) if (p) all.push([normPhrase(p), value]);
   }
   all.sort((a, b) => b[0].length - a[0].length);
   for (const [p, value] of all) {
+    if (!p) continue;
     const re = new RegExp(`(^|\\s)${escapeRe(p)}(?=\\s|$)`);
     if (re.test(text)) return { value, text: text.replace(re, ' ') };
   }
   return { value: '', text };
+}
+
+function hasWord(text, words) {
+  for (const w of words) {
+    const re = new RegExp(`(^|\\s)${escapeRe(normPhrase(w))}(?=\\s|$)`);
+    if (re.test(text)) return { hit: true, text: text.replace(re, ' ') };
+  }
+  return { hit: false, text };
+}
+
+// "North Pens" can also be heard as "north pen" or "north pens pasture".
+function nameAliases(names) {
+  const out = {};
+  for (const n of names || []) {
+    const base = normPhrase(n);
+    if (!base) continue;
+    const singular = base.split(' ').map((w) => (w.length > 3 && w.endsWith('s') ? w.slice(0, -1) : w)).join(' ');
+    out[n] = [...new Set([base, singular, `${base} pasture`, `${singular} pasture`, `${base} herd`])];
+  }
+  return out;
 }
 
 export function mergeAliases(base, extra) {
@@ -78,18 +113,25 @@ export function mergeAliases(base, extra) {
   return out;
 }
 
+const TAG_WORDS = new Set(['tag', 'tags', 'calf', 'number', 'tagged']);
+const TEMP_WORDS = new Set(['temp', 'temps', 'temperature', 'fever', 'running', 'temped', 'tempt']);
+const FILLER = new Set(['of', 'is', 'at', 'was', 'number', 'a', 'the']);
+const isNumTok = (t) => /^\d+(\.\d+)?$/.test(t || '');
+
 /**
- * Turns "blue 42 103.8 draxxin pulled by jake" into form fields.
- * ctx: { colors: ['blue', ...], crew: [{email, name}], extraTreatmentAliases: {phrase: treatment} }
+ * Turns "blue 42 103.8 draxxin pulled by jake" into form fields. Order doesn't matter:
+ * "drax 4.2 blue 42 north pens" gives the same result.
+ * ctx: { colors, crew: [{email, name}], extraTreatmentAliases, locations: [], herds: [] }
  */
 export function parseUtterance(raw, ctx = {}) {
   const result = {
-    raw, tagColor: '', tagNum: '', temp: null, treatment: '', diagnosis: '', cause: '',
-    isDeath: false, pulledBy: '', notes: '', autoCNT: false,
+    raw, tagColor: '', tagNum: '', noTag: false, temp: null, treatment: '', diagnosis: '', cause: '',
+    isDeath: false, pulledBy: '', notes: '', autoCNT: false, location: '', samePlace: false, herd: '',
+    hr3Ambiguous: false,
   };
   let s = ` ${String(raw || '').toLowerCase()} `;
 
-  const noteMatch = s.match(/\b(?:note|notes|comment)\b[:\s]*(.*)$/);
+  const noteMatch = s.match(/\b(?:note|notes|comment|description)\b[:\s]*(.*)$/);
   if (noteMatch) {
     result.notes = noteMatch[1].trim();
     s = s.slice(0, noteMatch.index);
@@ -98,21 +140,66 @@ export function parseUtterance(raw, ctx = {}) {
   s = s
     .replace(/[°,!?;:"]/g, ' ')
     .replace(/(\d)\s*(?:degrees?|deg|f)\b/g, '$1 ')
+    .replace(/\bdegrees?\b/g, ' ')
     .replace(/\b(hr|lr)-(\d)/g, '$1$2')
+    .replace(/#\s*(\d)/g, 'tag $1')
     .replace(/-/g, ' ')
     .replace(/\.(?!\d)/g, ' ')
     .replace(/\s+/g, ' ');
 
-  const treat = takePhrase(s, mergeAliases(TREATMENT_ALIASES, ctx.extraTreatmentAliases));
-  result.treatment = treat.value;
-  s = treat.text;
+  // Number words to digits, then "104 point 2" -> "104.2", before anything else is matched.
+  let toks = numberWordsToDigits(s.trim().split(/\s+/).filter(Boolean));
+  const merged = [];
+  for (let i = 0; i < toks.length; i++) {
+    if ((toks[i] === 'point' || toks[i] === 'dot') && /^\d+$/.test(merged[merged.length - 1] || '') && /^\d+$/.test(toks[i + 1] || '')) {
+      merged[merged.length - 1] = `${merged[merged.length - 1]}.${toks[i + 1]}`;
+      i++;
+    } else merged.push(toks[i]);
+  }
+  s = ` ${merged.join(' ')} `;
+
+  // Admin-defined names first: a pasture called "Red Hill" shouldn't become a red tag.
+  if (ctx.locations && ctx.locations.length) {
+    const loc = takePhrase(s, nameAliases(ctx.locations));
+    result.location = loc.value;
+    s = loc.text;
+  }
+  if (ctx.herds && ctx.herds.length) {
+    const herd = takePhrase(s, nameAliases(ctx.herds));
+    result.herd = herd.value;
+    s = herd.text;
+  }
+  let w = hasWord(s, SAME_PLACE_WORDS);
+  result.samePlace = w.hit;
+  s = w.text;
+  w = hasWord(s, NO_TAG_WORDS);
+  result.noTag = w.hit;
+  s = w.text;
 
   const diag = takePhrase(s, DIAGNOSIS_ALIASES);
   result.diagnosis = diag.value;
   s = diag.text;
 
-  for (const w of DEATH_WORDS) {
-    const re = new RegExp(`(^|\\s)${w}(?=\\s|$)`);
+  const treat = takePhrase(s, mergeAliases(TREATMENT_ALIASES, ctx.extraTreatmentAliases));
+  result.treatment = treat.value;
+  s = treat.text;
+
+  // A bare "HR3" (drug said separately, or not at all).
+  const bare = hasWord(s, HR3_BARE);
+  s = bare.text;
+  if (bare.hit) {
+    if (result.treatment === 'LR1 Bio-Mycin') result.treatment = 'HR3 Bio-Mycin';
+    else if (!result.treatment) result.hr3Ambiguous = true;
+  }
+  // Leftover "hr 2" / "lr 1" pieces must not be read as tag numbers.
+  s = s.replace(/(^|\s)[hl] ?r ?\d(?=\s|$)/g, ' ');
+  // Castrating is both the diagnosis and the treatment.
+  if (result.treatment === 'Castration – Bio-Mycin' && !result.diagnosis) result.diagnosis = 'Bull Castrated';
+  if (result.diagnosis === 'Bull Castrated' && !result.treatment) result.treatment = 'Castration – Bio-Mycin';
+  s = s.replace(/(^|\s)bull(?=\s|$)/g, ' ');
+
+  for (const dw of DEATH_WORDS) {
+    const re = new RegExp(`(^|\\s)${dw}(?=\\s|$)`);
     if (re.test(s)) {
       result.isDeath = true;
       s = s.replace(re, ' ');
@@ -152,84 +239,94 @@ export function parseUtterance(raw, ctx = {}) {
     }
   }
 
-  let tokens = s.trim().split(/\s+/).filter(Boolean);
-  tokens = numberWordsToDigits(tokens);
-  // "103 point 3" -> "103.3"
-  const merged = [];
-  for (let i = 0; i < tokens.length; i++) {
-    if (tokens[i] === 'point' && merged.length && /^\d+$/.test(merged[merged.length - 1]) && /^\d+$/.test(tokens[i + 1] || '')) {
-      merged[merged.length - 1] = `${merged[merged.length - 1]}.${tokens[i + 1]}`;
-      i++;
-    } else merged.push(tokens[i]);
-  }
-  tokens = merged;
+  const tokens = s.trim().split(/\s+/).filter(Boolean);
 
   // Colour
   const allowed = new Set((ctx.colors && ctx.colors.length ? ctx.colors : Object.keys(COLOR_ALIASES)).map((c) => c.toLowerCase()));
   let colorIdx = -1;
   for (let i = 0; i < tokens.length && colorIdx < 0; i++) {
     for (const [color, words] of Object.entries(COLOR_ALIASES)) {
-      if (words.includes(tokens[i]) && allowed.has(color)) {
+      const m = tokens[i].match(/^([a-z]+)(\d*)$/); // also "blue42"
+      if (m && words.includes(m[1]) && allowed.has(color)) {
         result.tagColor = color;
+        if (m[2]) tokens.splice(i, 1, m[1], m[2]);
         colorIdx = i;
         break;
       }
     }
   }
-  // Glued forms like "blue42"
-  if (colorIdx < 0) {
-    for (let i = 0; i < tokens.length && colorIdx < 0; i++) {
-      const m = tokens[i].match(/^([a-z]+)(\d+)$/);
-      if (m) {
-        for (const [color, words] of Object.entries(COLOR_ALIASES)) {
-          if (words.includes(m[1]) && allowed.has(color)) {
-            result.tagColor = color;
-            tokens.splice(i, 1, m[1], m[2]);
-            colorIdx = i;
-            break;
-          }
+
+  // Numbers right after "tag" / "temp" go where they're told.
+  const numAfter = (i) => {
+    for (let j = i + 1; j < Math.min(i + 4, tokens.length); j++) {
+      if (isNumTok(tokens[j])) return j;
+      if (!FILLER.has(tokens[j])) return -1;
+    }
+    return -1;
+  };
+  let tagIdx = -1;
+  let tempIdx = -1;
+  tokens.forEach((t, i) => {
+    if (TAG_WORDS.has(t) && tagIdx < 0) {
+      const j = numAfter(i);
+      if (j >= 0 && !tokens[j].includes('.')) tagIdx = j;
+    }
+    if (TEMP_WORDS.has(t) && tempIdx < 0) tempIdx = numAfter(i);
+  });
+
+  const nums = [];
+  tokens.forEach((t, idx) => {
+    if (isNumTok(t)) nums.push({ idx, text: t, val: Number(t), dec: t.includes('.') });
+  });
+  const tempLike = (n) => (n.val >= 95 && n.val <= 110) || (n.val >= 950 && n.val < 1100);
+
+  // Temperature
+  let temp = null;
+  let tempUsed = new Set();
+  if (tempIdx >= 0) {
+    const n = nums.find((x) => x.idx === tempIdx);
+    const next = nums.find((x) => x.idx === tempIdx + 1);
+    if (!n.dec && n.val >= 95 && n.val <= 110 && next && /^\d$/.test(next.text) && next.idx !== tagIdx) {
+      temp = Number(`${n.val}.${next.text}`);
+      tempUsed.add(next.idx);
+    } else temp = normalizeTemp(n.text);
+    tempUsed.add(tempIdx);
+  }
+
+  // Tag number
+  if (tagIdx < 0 && !result.noTag) {
+    const whole = nums.filter((n) => !n.dec && !tempUsed.has(n.idx));
+    const afterColor = colorIdx >= 0 ? whole.find((n) => n.idx > colorIdx) : null;
+    const notTemp = whole.find((n) => !tempLike(n));
+    const cand = afterColor || (temp === null && whole.length > 1 ? notTemp : null) || notTemp || whole[0];
+    if (cand) tagIdx = cand.idx;
+  }
+  if (tagIdx >= 0 && !result.noTag) result.tagNum = tokens[tagIdx].replace(/^0+(?=\d)/, '');
+
+  if (temp === null) {
+    const rest = nums.filter((n) => n.idx !== tagIdx && !tempUsed.has(n.idx));
+    const dec = rest.find((n) => n.dec && n.val >= 90 && n.val <= 110) || rest.find((n) => n.dec && n.val < 10);
+    if (dec) temp = normalizeTemp(dec.text);
+    if (temp === null) {
+      for (let i = 0; i < rest.length; i++) {
+        const n = rest[i];
+        if (!n.dec && n.val >= 95 && n.val <= 110) {
+          const next = rest[i + 1];
+          if (next && next.idx === n.idx + 1 && /^\d$/.test(next.text)) temp = Number(`${n.val}.${next.text}`);
+          else temp = n.val;
+          break;
+        }
+        if (!n.dec && n.val >= 950 && n.val < 1100) {
+          temp = n.val / 10;
+          break;
         }
       }
     }
   }
-
-  const nums = [];
-  tokens.forEach((t, idx) => {
-    if (/^\d+(\.\d+)?$/.test(t)) nums.push({ idx, text: t, val: Number(t), dec: t.includes('.') });
-  });
-
-  // Tag number: first whole number after the colour (or the first whole number at all)
-  let tagIdx = -1;
-  const tagCand = nums.find((n) => !n.dec && (colorIdx < 0 || n.idx > colorIdx)) || (colorIdx < 0 ? null : nums.find((n) => !n.dec));
-  if (tagCand) {
-    result.tagNum = tagCand.text.replace(/^0+(?=\d)/, '');
-    tagIdx = tagCand.idx;
-  }
-
-  // Temperature
-  const rest = nums.filter((n) => n.idx !== tagIdx);
-  let temp = null;
-  const dec = rest.find((n) => n.dec && n.val >= 90 && n.val <= 110);
-  if (dec) temp = dec.val;
-  if (temp === null) {
-    for (let i = 0; i < rest.length; i++) {
-      const n = rest[i];
-      if (!n.dec && n.val >= 95 && n.val <= 110) {
-        const next = rest[i + 1];
-        if (next && next.idx === n.idx + 1 && /^\d$/.test(next.text)) temp = Number(`${n.val}.${next.text}`);
-        else temp = n.val;
-        break;
-      }
-      if (!n.dec && n.val >= 950 && n.val < 1100) {
-        temp = n.val / 10;
-        break;
-      }
-    }
-  }
-  result.temp = temp;
+  result.temp = Number.isFinite(temp) ? temp : null;
 
   // Christian's rule: under 103.5°F and nothing named -> Check No Treatment.
-  if (!result.isDeath && !result.treatment && temp !== null && temp < TEMP_THRESHOLD &&
+  if (!result.isDeath && !result.treatment && !result.hr3Ambiguous && result.temp !== null && result.temp < TEMP_THRESHOLD &&
       (!result.diagnosis || result.diagnosis === 'Respiratory')) {
     result.treatment = CNT;
     result.autoCNT = true;

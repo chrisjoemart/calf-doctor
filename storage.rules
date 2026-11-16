@@ -1,0 +1,31 @@
+rules_version = '2';
+
+// Calf Doctor photo/video rules.
+// Paste into Firebase console → Storage → Rules and Publish. When the console asks to let
+// Storage rules read Firestore (to check the crew list), allow it.
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function signedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+    function email() {
+      return request.auth.token.email.lower();
+    }
+    function isMember() {
+      return signedIn() && (
+        email() in ['chrisjoemart@gmail.com'] ||
+        firestore.get(/databases/(default)/documents/crew/$(email())).data.active == true
+      );
+    }
+
+    match /entries/{entryId}/{file} {
+      allow read: if isMember();
+      // Photos and videos only, up to 250 MB each. No overwriting once uploaded.
+      allow create: if isMember()
+        && request.resource.size < 250 * 1024 * 1024
+        && request.resource.contentType.matches('(image|video)/.*');
+      allow delete: if isMember();
+    }
+  }
+}

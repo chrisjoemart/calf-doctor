@@ -1,14 +1,16 @@
 import {
-  DIAGNOSES, TREATMENTS, CAUSES, CNT, TEMP_THRESHOLD, DEFAULT_COLORS, COLOR_HEX,
+  DIAGNOSES, TREATMENTS, DOSED_TREATMENTS, CAUSES, CNT, TEMP_THRESHOLD, DEFAULT_COLORS, COLOR_HEX, MOVED_WARN_MILES,
 } from './constants.js';
 import {
   h, uid, cap, fmtWhen, fmtDay, startOfDay, dayKey, pct, lsGet, lsSet, tagKey, tagLabel, normalizeTemp,
+  noTagKey, milesBetween, isIOS, isStandalone,
 } from './util.js';
 import { parseUtterance, listen, speechSupported, isYes, isNo } from './voice.js';
 import { analyze } from './protocol.js';
 import { buildIndex, computeReport, rangeFor, toCSV } from './reports.js';
+import { prepareFiles, createUploader } from './media.js';
 
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 
 let store;
 const state = {
@@ -34,9 +36,12 @@ const state = {
   error: '',
   listening: false,
   confirmMode: false,
+  lastSaved: null,
+  mediaWaiting: 0,
 };
 let stopListening = null;
 let installPrompt = null;
+let uploader = null;
 
 // ---------- helpers ----------
 const season = () => Number(state.settings.season) || new Date().getFullYear();
@@ -59,6 +64,12 @@ function seasonColors() {
 }
 const yearForColor = (color) => (seasonColors().find((c) => c.color === color) || { year: season() }).year;
 
+const pastures = () => (Array.isArray(state.settings.locations) ? state.settings.locations : []);
+const herds = () => (Array.isArray(state.settings.herds) ? state.settings.herds : []);
+const doseFor = (t) => ((state.settings.dosages || {})[t] || '').trim();
+// iPhone home-screen apps can't use the browser's voice recognition; the keyboard mic still works.
+const browserVoice = () => speechSupported() && !(isIOS() && isStandalone());
+
 function activeCrew() {
   return state.crew.filter((c) => c.active !== false).sort((a, b) => (a.name || a.email).localeCompare(b.name || b.email));
 }
@@ -73,8 +84,8 @@ function defaultPulledBy() {
 function blankForm(keepColor) {
   return {
     tagColor: keepColor || (seasonColors()[0] || {}).color || 'blue',
-    tagNum: '', diagnosis: '', temp: '', treatment: '', cause: '', notes: '',
-    pulledBy: defaultPulledBy(),
+    tagNum: '', noTag: false, diagnosis: '', temp: '', treatment: '', cause: '', notes: '', herd: '',
+    pulledBy: defaultPulledBy(), files: [], media: [],
   };
 }
 
@@ -96,13 +107,37 @@ function captureGPS() {
     navigator.geolocation.getCurrentPosition(
       (p) => {
         state.gps = { lat: Math.round(p.coords.latitude * 1e6) / 1e6, lng: Math.round(p.coords.longitude * 1e6) / 1e6, acc: Math.round(p.coords.accuracy), at: Date.now() };
+        const el = document.getElementById('pastureWarn');
+        if (el) el.replaceChildren(...movedWarning());
       },
       () => {},
-      { enableHighAccuracy: false, timeout: 15000, maximumAge: 300000 }
+      { enableHighAccuracy: true, timeout: 20000, maximumAge: 60000 }
     );
   } catch {
     /* no GPS here */
   }
+}
+
+// My most recent entry with GPS, if it was in the same pasture as now.
+function lastEntryHere() {
+  const mine = state.entries.filter((e) => e.enteredBy === myEmail() && e.gps && !(state.editingId && e.id === state.editingId))
+    .sort((a, b) => b.at - a.at)[0];
+  return mine && mine.location === state.location ? mine : null;
+}
+
+// Miles moved since the last entry in this pasture, or null when we can't tell.
+function milesMoved() {
+  const g = state.gps;
+  const last = lastEntryHere();
+  if (!g || !last || Date.now() - g.at > 5 * 60000) return null;
+  if (g.acc > 400 || (last.gps.acc || 0) > 400) return null; // too fuzzy to judge
+  return milesBetween(g, last.gps);
+}
+
+function movedWarning() {
+  const m = milesMoved();
+  if (m === null || m <= MOVED_WARN_MILES) return [];
+  return [h('div', { class: 'warn' }, `⚠ You've moved about ${m < 10 ? m.toFixed(1) : Math.round(m)} mi since your last entry in ${state.location}. Still the same pasture?`)];
 }
 
 // ---------- toasts & modals ----------
@@ -110,9 +145,10 @@ function toast(msg, action) {
   const t = document.getElementById('toast');
   const btn = action ? h('button', { class: 'toast-btn', onclick: () => { t.classList.remove('show'); action.fn(); } }, action.label) : null;
   t.replaceChildren(...[h('span', null, msg), btn].filter(Boolean));
+  t.onclick = (e) => { if (e.target === t || e.target.tagName === 'SPAN') t.classList.remove('show'); };
   t.classList.add('show');
   clearTimeout(toast._t);
-  toast._t = setTimeout(() => t.classList.remove('show'), 4500);
+  toast._t = setTimeout(() => t.classList.remove('show'), 3000);
 }
 
 function modal(title, body, actions = []) {
@@ -128,17 +164,20 @@ function modal(title, body, actions = []) {
   return close;
 }
 
-function pickLocation(then) {
-  const locs = state.settings.locations && state.settings.locations.length ? state.settings.locations : [];
-  const other = h('input', { class: 'input', placeholder: 'Or type a location', value: '' });
+function pickLocation(then, opts = {}) {
+  const locs = pastures();
+  const other = h('input', { class: 'input', placeholder: 'Or type a pasture', value: '' });
   let close;
+  const choose = (l) => { setLocation(l); close(); then && then(); };
   const body = h('div', null,
-    h('p', { class: 'muted' }, 'Set once per run. Every entry gets this location until you change it.'),
+    opts.warning ? h('div', { class: 'warn', style: { marginTop: 0, marginBottom: '10px' } }, opts.warning) : null,
+    h('p', { class: 'muted' }, 'Every entry gets this pasture until you change it. You can also say the pasture name into the mic.'),
+    state.location && opts.offerSame ? h('button', { class: 'btn big primary', style: { marginBottom: '12px' }, onclick: () => choose(state.location) }, `✓ Still ${state.location}`) : null,
     h('div', { class: 'chips' },
-      locs.map((l) => h('button', { class: 'chip' + (l === state.location ? ' on' : ''), onclick: () => { setLocation(l); close(); then && then(); } }, l))),
-    locs.length ? null : h('p', { class: 'muted' }, 'No locations set up yet. An admin can add them under More → Settings.'),
+      locs.filter((l) => !(opts.offerSame && l === state.location)).map((l) => h('button', { class: 'chip' + (l === state.location ? ' on' : ''), onclick: () => choose(l) }, l))),
+    locs.length ? null : h('p', { class: 'muted' }, 'No pastures set up yet. An admin can add them under More → Settings.'),
     other);
-  close = modal('Doctoring location', body, [{ label: 'Use typed location', kind: 'primary', fn: () => { if (!other.value.trim()) return false; setLocation(other.value.trim()); then && then(); } }]);
+  close = modal(opts.title || 'Pasture pulled from', body, [{ label: 'Use typed pasture', kind: 'primary', fn: () => { if (!other.value.trim()) return false; setLocation(other.value.trim()); then && then(); } }]);
 }
 
 function setLocation(l) {
@@ -150,7 +189,7 @@ function setLocation(l) {
 // ---------- shell ----------
 function syncBadge() {
   if (store.mode === 'demo') return h('span', { class: 'badge demo' }, 'Demo');
-  const pending = state.entries.filter((e) => e._pending).length;
+  const pending = state.entries.filter((e) => e._pending).length + state.mediaWaiting;
   if (!state.online) return h('span', { class: 'badge off' }, pending ? `Offline · ${pending} waiting` : 'Offline');
   if (pending) return h('span', { class: 'badge sync' }, `Syncing ${pending}…`);
   return h('span', { class: 'badge ok' }, 'Synced');
@@ -323,6 +362,37 @@ function renderDenied(root) {
 }
 
 // ---------- doctor (entry form) ----------
+function installBanner() {
+  if (store.mode === 'demo' || isStandalone() || lsGet('cd-install-hidden', false)) return null;
+  const hide = () => { lsSet('cd-install-hidden', true); render(); };
+  return h('section', { class: 'card install' },
+    h('div', { class: 'install-top' }, h('img', { src: 'icon-192.png', alt: '', class: 'install-icon' }),
+      h('div', null, h('strong', null, 'Put Calf Doctor on your home screen'),
+        h('div', { class: 'muted small' }, 'Opens like an app, full screen, even with no signal.'))),
+    installPrompt
+      ? h('button', { class: 'btn primary', onclick: async () => { installPrompt.prompt(); installPrompt = null; render(); } }, 'Add app icon')
+      : h('p', { class: 'small' }, isIOS()
+        ? ['In Safari, tap the Share button ', h('strong', null, '⬆'), ' at the bottom, scroll down, tap ', h('strong', null, 'Add to Home Screen'), '.']
+        : ['Tap the browser menu ', h('strong', null, '⋮'), ', then ', h('strong', null, 'Add to Home screen'), ' or ', h('strong', null, 'Install app'), '.']),
+    h('button', { class: 'link muted-link', onclick: hide }, 'Hide this'));
+}
+
+function doseBox(t) {
+  if (!t || t === CNT || t === 'Other') return null;
+  const d = doseFor(t);
+  return d
+    ? h('div', { class: 'dose' }, h('span', { class: 'dose-l' }, 'Dose'), h('span', null, d))
+    : h('div', { class: 'dose none' }, `No dose set for ${t} yet.${isAdmin() ? ' Add it under More → Settings.' : ' Ask Christian.'}`);
+}
+
+function doseChart(open) {
+  const rows = DOSED_TREATMENTS.map((t) => [t, doseFor(t)]);
+  return h('details', { class: 'dose-chart', open: open || undefined },
+    h('summary', null, 'Dosage chart'),
+    h('table', null, h('tbody', null, rows.map(([t, d]) => h('tr', null, h('td', null, t), h('td', { class: d ? '' : 'muted' }, d || 'not set'))))),
+    h('p', { class: 'muted small' }, isAdmin() ? 'Change these under More → Settings.' : 'Set by Christian.'));
+}
+
 function renderDoctor(main) {
   if (!state.form) state.form = blankForm();
   const f = state.form;
@@ -333,35 +403,53 @@ function renderDoctor(main) {
     main.append(h('div', { class: 'edit-bar' },
       h('span', null, `Editing ${tagLabel(editing, season())} from ${fmtWhen(editing.at)}`),
       h('button', { class: 'link', onclick: cancelEdit }, 'Cancel')));
+  } else {
+    const banner = installBanner();
+    if (banner) main.append(banner);
+    if (state.lastSaved && Date.now() - state.lastSaved.at < 10 * 60000) {
+      const ls = state.lastSaved;
+      main.append(h('div', { class: 'saved-bar' },
+        h('span', null, '✓ Saved ', h('strong', null, ls.summary)),
+        h('button', { class: 'link', onclick: () => { const e = state.entries.find((x) => x.id === ls.id); if (e) startEdit(e); } }, 'Edit')));
+    }
   }
 
-  main.append(h('button', { class: 'loc-bar', onclick: () => pickLocation() },
-    h('span', null, '📍 ', state.location || 'Set doctoring location'), h('span', { class: 'link' }, 'Change')));
+  // Pasture pulled from
+  main.append(h('section', { class: 'card pasture' },
+    h('div', { class: 'pasture-row' },
+      h('div', null, h('div', { class: 'lbl' }, 'Pasture pulled from'),
+        h('div', { class: 'pasture-name' }, editing ? editing.location || '—' : state.location || 'Not set')),
+      editing ? null : h('button', { class: 'btn small', onclick: () => pickLocation() }, state.location ? 'Change' : 'Set')),
+    editing ? null : h('div', { id: 'pastureWarn' }, movedWarning())));
 
   // Voice
   const heard = h('p', { class: 'heard', id: 'heard' }, state.listening ? 'Listening…' : '');
-  const say = h('input', { class: 'input', id: 'say', placeholder: 'Or type: blue 42 103.8 drax', autocomplete: 'off',
-    onkeydown: (e) => { if (e.key === 'Enter') { applyUtterance(say.value, false); say.value = ''; } } });
+  const say = h('input', { class: 'input', id: 'say', placeholder: browserVoice() ? 'Or type: blue 42 4.2 drax' : 'Tap here, then the 🎤 on your keyboard', autocomplete: 'off', enterkeyhint: 'done',
+    onkeydown: (e) => { if (e.key === 'Enter') { applyUtterance(say.value, false); say.value = ''; say.blur(); } } });
   main.append(h('section', { class: 'card voice' },
-    speechSupported()
+    browserVoice()
       ? h('button', { class: 'mic' + (state.listening ? ' live' : ''), id: 'mic', onclick: () => (state.listening ? stopVoice() : startVoice()) },
         h('span', { class: 'mic-icon' }, state.listening ? '■' : '🎤'),
         h('span', null, state.listening ? 'Listening… tap to stop' : 'Tap and say it'))
-      : h('p', { class: 'muted small' }, 'Voice isn\'t available in this browser. Use your keyboard\'s mic button in the box below.'),
+      : h('p', { class: 'small voice-help' }, 'To talk: tap the box below, tap the ', h('strong', null, '🎤'), ' on your keyboard, say it, then tap ', h('strong', null, 'Fill'), '.'),
     heard,
     h('div', { class: 'row' }, say, h('button', { class: 'btn', onclick: () => { applyUtterance(say.value, false); say.value = ''; } }, 'Fill')),
-    state.confirmMode ? h('div', { class: 'confirm-bar' }, 'Check it below. Say "yes" or tap Save.') : null));
+    h('p', { class: 'muted small say-hint' }, 'Any order: tag, temp, drug, diagnosis, pasture. "4.2" means 104.2. Say "no tag" for an untagged calf.'),
+    state.confirmMode ? h('div', { class: 'confirm-bar' }, 'Check it below. ', browserVoice() ? 'Say "yes" or tap Save.' : 'Then tap Save.') : null));
 
   // Tag
   const num = h('input', { class: 'input tagnum', id: 'tagNum', inputmode: 'numeric', pattern: '[0-9]*', autocomplete: 'off', placeholder: 'Tag #', value: f.tagNum,
     oninput: () => { num.value = num.value.replace(/\D/g, ''); f.tagNum = num.value; updateTagPanel(); } });
   main.append(h('section', { class: 'card' },
-    h('label', { class: 'lbl' }, 'Tag'),
-    h('div', { class: 'chips colors' }, seasonColors().map(({ color, year }) =>
-      h('button', { class: 'chip color' + (f.tagColor === color ? ' on' : ''), onclick: () => { f.tagColor = color; render(); } },
-        h('span', { class: 'swatch', style: { background: COLOR_HEX[color] || '#999' } }),
-        cap(color), year !== season() ? h('small', null, ` '${String(year).slice(2)}`) : null))),
-    num,
+    h('div', { class: 'lbl-row' }, h('label', { class: 'lbl' }, 'Tag'),
+      h('button', { class: 'chip notag' + (f.noTag ? ' on' : ''), onclick: () => { f.noTag = !f.noTag; if (f.noTag) f.tagNum = ''; render(); } }, f.noTag ? '✓ No tag' : 'No tag')),
+    f.noTag
+      ? h('p', { class: 'muted' }, 'Saving without a tag. This calf won\'t show up in tag lookup or repull counts.')
+      : [h('div', { class: 'chips colors' }, seasonColors().map(({ color, year }) =>
+        h('button', { class: 'chip color' + (f.tagColor === color ? ' on' : ''), onclick: () => { f.tagColor = color; render(); } },
+          h('span', { class: 'swatch', style: { background: COLOR_HEX[color] || '#999' } }),
+          cap(color), year !== season() ? h('small', null, ` '${String(year).slice(2)}`) : null))),
+      num],
     h('div', { id: 'tagPanel' })));
 
   // Diagnosis
@@ -371,21 +459,25 @@ function renderDoctor(main) {
       h('button', { class: 'chip' + (f.diagnosis === d ? ' on' : '') + (d === 'Death' ? ' danger' : ''), onclick: () => { f.diagnosis = f.diagnosis === d ? '' : d; render(); } }, d)))));
 
   if (kind === 'death') {
-    main.append(h('section', { class: 'card' },
-      h('label', { class: 'lbl' }, 'Cause of death'),
-      h('div', { class: 'chips' }, CAUSES.map((c) =>
-        h('button', { class: 'chip' + (f.cause === c ? ' on' : ''), onclick: () => { f.cause = c; render(); } }, c))),
-      h('p', { class: 'muted small' }, state.gps ? `GPS will be saved (±${state.gps.acc} m).` : 'GPS will be saved if the phone allows it.')));
+    renderDeathFields(main, f, editing);
   } else {
-    const temp = h('input', { class: 'input temp', id: 'temp', inputmode: 'decimal', autocomplete: 'off', placeholder: 'e.g. 104.2', value: f.temp,
-      oninput: () => { f.temp = temp.value; updateTagPanel(); },
-      onblur: () => { const t = normalizeTemp(temp.value); if (Number.isFinite(t)) { temp.value = String(t); f.temp = temp.value; updateTagPanel(); } } });
+    const preview = h('span', { class: 'temp-preview', id: 'tempPreview' });
+    const showPreview = () => {
+      const t = normalizeTemp(temp.value);
+      preview.textContent = Number.isFinite(t) && String(t) !== temp.value.trim() ? `= ${t}°F` : '';
+    };
+    const temp = h('input', { class: 'input temp', id: 'temp', inputmode: 'decimal', autocomplete: 'off', placeholder: 'e.g. 4.2 = 104.2', value: f.temp,
+      oninput: () => { f.temp = temp.value; showPreview(); updateTagPanel(); },
+      onblur: () => { const t = normalizeTemp(temp.value); if (Number.isFinite(t)) { temp.value = String(t); f.temp = temp.value; showPreview(); updateTagPanel(); } } });
     main.append(h('section', { class: 'card' },
-      h('label', { class: 'lbl' }, 'Temperature °F'), temp));
+      h('label', { class: 'lbl' }, 'Temperature °F'), h('div', { class: 'temp-wrap' }, temp, preview)));
+    showPreview();
     main.append(h('section', { class: 'card' },
       h('label', { class: 'lbl' }, 'Treatment'),
       h('div', { class: 'chips' }, TREATMENTS.map((t) =>
-        h('button', { class: 'chip' + (f.treatment === t ? ' on' : '') + (t === CNT ? ' cnt' : ''), onclick: () => { f.treatment = f.treatment === t ? '' : t; render(); } }, t)))));
+        h('button', { class: 'chip' + (f.treatment === t ? ' on' : '') + (t === CNT ? ' cnt' : ''), onclick: () => { f.treatment = f.treatment === t ? '' : t; render(); } }, t))),
+      doseBox(f.treatment),
+      doseChart(false)));
   }
 
   // Pulled by + notes
@@ -395,18 +487,81 @@ function renderDoctor(main) {
     crew.find((c) => c.email === f.pulledBy) ? null : h('option', { value: f.pulledBy, selected: true }, nameOf(f.pulledBy)));
   const notes = h('input', { class: 'input', placeholder: 'Notes (optional)', value: f.notes, oninput: () => { f.notes = notes.value; } });
   main.append(h('section', { class: 'card' },
-    h('label', { class: 'lbl' }, 'Pulled by'), sel,
-    h('label', { class: 'lbl' }, 'Notes'), notes));
+    h('label', { class: 'lbl' }, kind === 'death' ? 'Found by' : 'Pulled by'), sel,
+    kind === 'death' ? null : [h('label', { class: 'lbl' }, 'Notes'), notes]));
 
   main.append(h('div', { id: 'formError' }));
+  const where = editing ? '' : state.location ? `at ${state.location}` : 'pick a pasture';
   main.append(h('div', { class: 'save-row' },
-    h('button', { class: 'btn save', onclick: () => save() }, editing ? 'Save changes' : 'Save'),
+    h('button', { class: 'btn save', onclick: () => save() },
+      h('span', null, editing ? 'Save changes' : 'Save'), where ? h('span', { class: 'save-sub' }, where) : null),
     editing && canEdit(editing) ? h('button', { class: 'btn danger', onclick: () => deleteEntry(editing) }, 'Delete') : null,
     !editing ? h('button', { class: 'btn ghost', onclick: () => { state.form = blankForm(f.tagColor); state.confirmMode = false; render(); } }, 'Clear') : null));
 
   main.append(h('section', { class: 'card', id: 'recent' }));
   updateRecent();
   updateTagPanel();
+}
+
+function renderDeathFields(main, f, editing) {
+  const hs = herds();
+  const herdSel = h('select', { class: 'input', onchange: () => { f.herd = herdSel.value; } },
+    h('option', { value: '' }, 'Pick a herd…'),
+    hs.map((x) => h('option', { value: x, selected: x === f.herd }, x)),
+    f.herd && !hs.includes(f.herd) ? h('option', { value: f.herd, selected: true }, f.herd) : null,
+    h('option', { value: 'Not sure', selected: f.herd === 'Not sure' }, 'Not sure'));
+  main.append(h('section', { class: 'card' },
+    h('label', { class: 'lbl' }, 'Herd'), herdSel,
+    hs.length ? null : h('p', { class: 'muted small' }, isAdmin() ? 'Add your herds under More → Settings.' : 'Christian hasn\'t set up the herd list yet.')));
+
+  main.append(h('section', { class: 'card' },
+    h('label', { class: 'lbl' }, 'Cause of death'),
+    h('div', { class: 'chips' }, CAUSES.map((c) =>
+      h('button', { class: 'chip' + (f.cause === c ? ' on' : ''), onclick: () => { f.cause = c; render(); } }, c))),
+    h('p', { class: 'muted small' }, state.gps ? `GPS will be saved (±${state.gps.acc} m).` : 'GPS will be saved if the phone allows it.')));
+
+  const desc = h('textarea', { class: 'input', rows: 4, placeholder: 'What you found: where, condition of the carcass, tracks, how long dead…', oninput: () => { f.notes = desc.value; } });
+  desc.value = f.notes || '';
+  main.append(h('section', { class: 'card' }, h('label', { class: 'lbl' }, 'Description'), desc));
+
+  // Photos and videos
+  const picker = h('input', { type: 'file', accept: 'image/*,video/*', multiple: true, class: 'hidden-file',
+    onchange: () => { f.files.push(...picker.files); picker.value = ''; render(); } });
+  const thumbs = h('div', { class: 'thumbs' });
+  for (const [i, file] of f.files.entries()) {
+    const url = URL.createObjectURL(file);
+    thumbs.append(h('div', { class: 'thumb' },
+      file.type.startsWith('video/') ? h('video', { src: url, muted: true, playsinline: true, preload: 'metadata' }) : h('img', { src: url, alt: '' }),
+      file.type.startsWith('video/') ? h('span', { class: 'thumb-tag' }, '▶ video') : null,
+      h('button', { class: 'thumb-x', 'aria-label': 'Remove', onclick: () => { f.files.splice(i, 1); render(); } }, '×')));
+  }
+  const existing = editing && editing.media ? editing.media : [];
+  main.append(h('section', { class: 'card' },
+    h('label', { class: 'lbl' }, 'Photos & videos'),
+    existing.length ? h('div', null, h('p', { class: 'muted small' }, `${existing.length} already attached`), mediaGallery(existing)) : null,
+    thumbs,
+    h('button', { class: 'btn', onclick: () => picker.click() }, '📷 Add photo or video'), picker,
+    h('p', { class: 'muted small' }, 'Take them now or pick from your camera roll. With no signal they wait on your phone and upload later.')));
+}
+
+// Shows saved photos/videos; files still on the uploader's phone say so.
+function mediaGallery(list) {
+  const wrap = h('div', { class: 'thumbs' });
+  for (const m of list) {
+    const cell = h('div', { class: 'thumb loading' }, h('span', { class: 'muted small' }, '…'));
+    wrap.append(cell);
+    (async () => {
+      let url = uploader ? await uploader.localURL(m.path) : null;
+      if (!url) url = await Promise.resolve(store.mediaURL(m.path)).catch(() => null);
+      cell.classList.remove('loading');
+      if (!url) { cell.replaceChildren(h('span', { class: 'muted small' }, 'Not uploaded yet')); return; }
+      const isVid = (m.type || '').startsWith('video/');
+      cell.replaceChildren(h('a', { href: url, target: '_blank', rel: 'noopener' },
+        isVid ? h('video', { src: url, muted: true, playsinline: true, preload: 'metadata' }) : h('img', { src: url, alt: '' })),
+      isVid ? h('span', { class: 'thumb-tag' }, '▶ video') : null);
+    })();
+  }
+  return wrap;
 }
 
 function updateRecent() {
@@ -422,7 +577,7 @@ function updateRecent() {
 
 function entryRow(e) {
   const line = e.kind === 'death'
-    ? `Death · ${e.cause || 'cause ?'}`
+    ? `Death · ${e.cause || 'cause ?'}${e.herd ? ' · ' + e.herd : ''}${e.media && e.media.length ? ' · 📷 ' + e.media.length : ''}`
     : `${e.treatment || '—'}${e.temp ? ' · ' + e.temp + '°' : ''}${e.diagnosis ? ' · ' + e.diagnosis : ''}`;
   return h('button', { class: 'entry' + (e.kind === 'death' ? ' dead' : '') + (e.treatment === CNT ? ' cnt' : ''), onclick: () => (canEdit(e) ? startEdit(e) : showEntry(e)) },
     h('div', { class: 'entry-top' },
@@ -435,15 +590,17 @@ function entryRow(e) {
 function showEntry(e) {
   modal(tagLabel(e, season()), h('div', null,
     h('p', null, fmtWhen(e.at)),
-    h('p', null, e.kind === 'death' ? `Death: ${e.cause}` : `${e.diagnosis || ''} ${e.temp ? e.temp + '°F' : ''} ${e.treatment || ''}`),
-    h('p', { class: 'muted' }, `Pulled by ${nameOf(e.pulledBy)} · entered by ${nameOf(e.enteredBy)}`),
+    h('p', null, e.kind === 'death' ? `Death: ${e.cause}${e.herd ? ' · herd: ' + e.herd : ''}` : `${e.diagnosis || ''} ${e.temp ? e.temp + '°F' : ''} ${e.treatment || ''}`),
+    e.dose ? h('p', { class: 'small' }, `Dose: ${e.dose}`) : null,
+    h('p', { class: 'muted' }, `${e.kind === 'death' ? 'Found' : 'Pulled'} by ${nameOf(e.pulledBy)} · entered by ${nameOf(e.enteredBy)}${e.location ? ' · ' + e.location : ''}`),
     e.notes ? h('p', null, e.notes) : null,
+    e.media && e.media.length ? mediaGallery(e.media) : null,
     h('p', { class: 'muted small' }, 'Only the person who entered it, or an admin, can change it.')), []);
 }
 
 function currentKey() {
   const f = state.form;
-  if (!f || !f.tagColor || !f.tagNum) return null;
+  if (!f || f.noTag || !f.tagColor || !f.tagNum) return null;
   return tagKey(yearForColor(f.tagColor), f.tagColor, f.tagNum);
 }
 
@@ -460,13 +617,15 @@ function updateTagPanel() {
   if (!panel) return;
   const f = state.form;
   const key = currentKey();
-  if (!key) {
+  if (!key && !f.noTag) {
     panel.replaceChildren();
     return;
   }
   const { hist, a } = currentAnalysis();
   const kids = [];
-  if (hist.length) {
+  if (f.noTag) {
+    /* no history for untagged calves */
+  } else if (hist.length) {
     kids.push(h('div', { class: 'history' },
       h('div', { class: 'muted small' }, `${hist.length} earlier ${hist.length === 1 ? 'entry' : 'entries'} this season`),
       [...hist].sort((x, y) => y.at - x.at).slice(0, 5).map((e) =>
@@ -475,10 +634,13 @@ function updateTagPanel() {
   } else {
     kids.push(h('div', { class: 'muted small new-calf' }, 'First entry for this tag this season.'));
   }
-  if (a.suggestion && a.suggestion !== f.treatment && formKind(f) === 'pull') {
-    kids.push(h('button', { class: 'suggest', onclick: () => { f.treatment = a.suggestion; render(); } },
-      h('span', null, 'Suggested: ', h('strong', null, a.suggestion)), h('span', { class: 'muted small' }, ` ${a.reason}. Tap to use.`)));
-  } else if (!a.suggestion && a.reason) {
+  if (a.suggestions.length && !a.suggestions.includes(f.treatment) && formKind(f) === 'pull') {
+    for (const sug of a.suggestions) {
+      const d = doseFor(sug);
+      kids.push(h('button', { class: 'suggest', onclick: () => { f.treatment = sug; render(); } },
+        h('span', null, 'Suggested: ', h('strong', null, sug)), h('span', { class: 'muted small' }, ` ${a.reason}.${d ? ' Dose: ' + d + '.' : ''} Tap to use.`)));
+    }
+  } else if (!a.suggestions.length && a.reason) {
     kids.push(h('div', { class: 'muted small' }, a.reason));
   }
   if (a.warnings.length) kids.push(h('div', { class: 'warn' }, a.warnings.map((w) => h('div', null, '⚠ ', w)), h('div', { class: 'small' }, 'You can still save.')));
@@ -487,10 +649,11 @@ function updateTagPanel() {
 
 function validate(f) {
   const errs = [];
-  if (!f.tagColor) errs.push('Pick a tag color.');
-  if (!f.tagNum) errs.push('Enter the tag number.');
+  if (!f.noTag && !f.tagColor) errs.push('Pick a tag color.');
+  if (!f.noTag && !f.tagNum) errs.push('Enter the tag number, or tap "No tag".');
   if (formKind(f) === 'death') {
     if (!f.cause) errs.push('Pick a cause of death.');
+    if (herds().length && !f.herd) errs.push('Pick the herd (or "Not sure").');
   } else {
     const t = normalizeTemp(f.temp);
     if (t === null) errs.push('Temperature is required on every pull.');
@@ -501,7 +664,7 @@ function validate(f) {
   return errs;
 }
 
-function save() {
+function save(opts = {}) {
   const f = state.form;
   const errs = validate(f);
   const box = document.getElementById('formError');
@@ -510,28 +673,44 @@ function save() {
     if (box) box.scrollIntoView({ behavior: 'smooth', block: 'center' });
     return false;
   }
-  if (!state.location) {
+  const editing = state.editingId ? state.entries.find((e) => e.id === state.editingId) : null;
+  if (!editing && !state.location) {
     pickLocation(() => save());
     return false;
   }
+  // Moved a long way but the pasture didn't change: make them confirm.
+  const moved = editing || opts.pastureChecked ? null : milesMoved();
+  if (moved !== null && moved > MOVED_WARN_MILES) {
+    stopVoice();
+    pickLocation(() => save({ pastureChecked: true }), {
+      title: 'Same pasture?', offerSame: true,
+      warning: `You've moved about ${moved.toFixed(1)} mi since your last entry in ${state.location}.`,
+    });
+    return false;
+  }
   const { a } = currentAnalysis();
-  const editing = state.editingId ? state.entries.find((e) => e.id === state.editingId) : null;
   const kind = formKind(f);
   const t = normalizeTemp(f.temp);
-  const year = yearForColor(f.tagColor);
+  const id = editing ? editing.id : uid();
+  const year = f.noTag ? null : yearForColor(f.tagColor);
+  const treatment = kind === 'death' ? '' : f.treatment;
+  const keepDose = editing && editing.treatment === treatment;
   const entry = {
     ...(editing || {}),
-    id: editing ? editing.id : uid(),
+    id,
     season: editing ? editing.season : season(),
+    noTag: !!f.noTag,
     tagYear: year,
-    tagColor: f.tagColor,
-    tagNum: f.tagNum.replace(/^0+(?=\d)/, ''),
-    tagKey: tagKey(year, f.tagColor, f.tagNum),
+    tagColor: f.noTag ? '' : f.tagColor,
+    tagNum: f.noTag ? '' : f.tagNum.replace(/^0+(?=\d)/, ''),
+    tagKey: f.noTag ? noTagKey(id) : tagKey(year, f.tagColor, f.tagNum),
     kind,
     diagnosis: f.diagnosis || '',
     temp: kind === 'death' ? (Number.isFinite(t) ? t : null) : t,
-    treatment: kind === 'death' ? '' : f.treatment,
+    treatment,
+    dose: keepDose ? editing.dose || '' : doseFor(treatment),
     cause: kind === 'death' ? f.cause : '',
+    herd: kind === 'death' ? f.herd || '' : '',
     notes: f.notes.trim(),
     pulledBy: f.pulledBy,
     enteredBy: editing ? editing.enteredBy : myEmail(),
@@ -540,15 +719,25 @@ function save() {
     at: editing ? editing.at : Date.now(),
     warnings: a.warnings,
     override: a.warnings.length > 0,
+    media: (editing && editing.media) || [],
   };
   if (editing) {
     entry.editedBy = myEmail();
     entry.editedAt = Date.now();
   }
-  if (!editing && kind === 'death') captureGPS();
-  Promise.resolve(store.saveEntry(entry)).catch((err) => toast('Couldn\'t save: ' + (err.code || err.message)));
-  const summary = `${tagLabel(entry, season())} · ${kind === 'death' ? 'Death (' + entry.cause + ')' : entry.treatment}`;
-  toast(`Saved ${summary}${!state.online && store.mode !== 'demo' ? ' (will sync)' : ''}`, { label: 'Edit', fn: () => startEdit(entry) });
+  const files = kind === 'death' ? [...f.files] : [];
+  const finish = async () => {
+    if (files.length) {
+      const { items, rejected } = await prepareFiles(files, id, uid);
+      if (rejected.length) toast(rejected.join('. '));
+      entry.media = [...entry.media, ...items.map(({ path, type, size, name }) => ({ path, type, size, name }))];
+      await uploader.add(items);
+    }
+    await store.saveEntry(entry);
+  };
+  finish().catch((err) => toast('Couldn\'t save: ' + (err.code || err.message)));
+  const summary = `${tagLabel(entry, season())} · ${kind === 'death' ? 'Death (' + entry.cause + ')' : entry.treatment}${files.length ? ' · 📷 ' + files.length : ''}`;
+  state.lastSaved = { id, summary: summary + (!state.online && store.mode !== 'demo' ? ' (will sync)' : ''), at: Date.now() };
   state.editingId = null;
   state.confirmMode = false;
   state.form = blankForm(f.tagColor);
@@ -563,9 +752,10 @@ function startEdit(e) {
   state.view = 'doctor';
   state.editingId = e.id;
   state.form = {
-    tagColor: e.tagColor, tagNum: e.tagNum, diagnosis: e.kind === 'death' ? 'Death' : e.diagnosis || '',
+    tagColor: e.tagColor || (seasonColors()[0] || {}).color, tagNum: e.tagNum || '', noTag: !!e.noTag,
+    diagnosis: e.kind === 'death' ? 'Death' : e.diagnosis || '',
     temp: e.temp === null || e.temp === undefined ? '' : String(e.temp), treatment: e.treatment || '', cause: e.cause || '',
-    notes: e.notes || '', pulledBy: e.pulledBy,
+    notes: e.notes || '', pulledBy: e.pulledBy, herd: e.herd || '', files: [],
   };
   render();
   window.scrollTo(0, 0);
@@ -595,6 +785,8 @@ function voiceCtx() {
     colors: seasonColors().map((c) => c.color),
     crew: activeCrew(),
     extraTreatmentAliases: state.settings.extraAliases || {},
+    locations: pastures(),
+    herds: herds(),
   };
 }
 
@@ -602,11 +794,13 @@ function applyUtterance(text, fromVoice) {
   if (!text || !text.trim()) return;
   const f = state.form || (state.form = blankForm());
   const p = parseUtterance(text, voiceCtx());
+  if (p.noTag) { f.noTag = true; f.tagNum = ''; }
   if (p.tagColor) f.tagColor = p.tagColor;
-  if (p.tagNum) f.tagNum = p.tagNum;
+  if (p.tagNum) { f.tagNum = p.tagNum; f.noTag = false; }
   if (p.isDeath) {
     f.diagnosis = 'Death';
     if (p.cause) f.cause = p.cause;
+    if (p.herd) f.herd = p.herd;
   } else {
     if (p.diagnosis) f.diagnosis = p.diagnosis;
     if (p.temp !== null) f.temp = String(p.temp);
@@ -614,11 +808,24 @@ function applyUtterance(text, fromVoice) {
   }
   if (p.pulledBy) f.pulledBy = p.pulledBy;
   if (p.notes) f.notes = f.notes ? f.notes + '; ' + p.notes : p.notes;
-  const got = [p.tagColor && p.tagNum ? `${cap(p.tagColor)} ${p.tagNum}` : '', p.temp !== null ? p.temp + '°' : '', p.treatment + (p.autoCNT ? ' (under 103.5°)' : ''), p.diagnosis, p.cause].filter(Boolean);
+  if (p.location && !state.editingId) setLocation(p.location);
+  const got = [
+    p.noTag ? 'No tag' : p.tagColor && p.tagNum ? `${cap(p.tagColor)} ${p.tagNum}` : p.tagNum ? `Tag ${p.tagNum}` : '',
+    p.temp !== null ? p.temp + '°' : '',
+    p.treatment + (p.autoCNT ? ` (under ${TEMP_THRESHOLD}°)` : ''),
+    p.diagnosis, p.cause, p.herd ? 'Herd: ' + p.herd : '',
+    p.location ? '📍 ' + p.location : p.samePlace ? '📍 same pasture' : '',
+  ].filter(Boolean);
   state.confirmMode = true;
   render();
   const heard = document.getElementById('heard');
-  if (heard) heard.replaceChildren(h('span', { class: 'muted' }, `Heard: "${text}"`), h('br'), got.length ? `Got: ${got.join(' · ')}` : 'Couldn\'t pick anything out. Try again or tap below.');
+  const need = validate(f).map((e) => e.replace(/\.$/, ''));
+  if (heard) {
+    heard.replaceChildren(h('span', { class: 'muted' }, `Heard: "${text}"`), h('br'),
+      got.length ? `Got: ${got.join(' · ')}` : 'Couldn\'t pick anything out. Try again or tap below.',
+      p.hr3Ambiguous ? h('div', { class: 'warn' }, 'HR3: say or tap NuFlor or Bio-Mycin.') : null,
+      need.length && got.length ? h('div', { class: 'muted small' }, `Still need: ${need.join('; ')}`) : null);
+  }
   if (fromVoice && got.length) setTimeout(() => listenForConfirm(), 350);
 }
 
@@ -644,7 +851,7 @@ function listenForConfirm() {
   if (state.view !== 'doctor') return;
   state.listening = true;
   const mic = document.getElementById('mic');
-  if (mic) { mic.classList.add('live'); mic.lastChild.textContent = 'Say "yes" to save…'; }
+  if (mic) { mic.classList.add('live'); mic.lastChild.textContent = state.location ? `"Yes" saves at ${state.location}…` : 'Say "yes" to save…'; }
   stopListening = listen({
     onFinal: (t) => {
       state.listening = false;
@@ -741,9 +948,9 @@ function renderReports(main) {
   const locRows = [...rep.locations.entries()].sort((a, b) => b[1].pulls - a[1].pulls);
   if (locRows.length) {
     main.append(h('section', { class: 'card' },
-      h('label', { class: 'lbl' }, 'By location'),
+      h('label', { class: 'lbl' }, 'By pasture pulled from'),
       h('div', { class: 'table-wrap' }, h('table', null,
-        h('thead', null, h('tr', null, ['Location', 'Pulls', 'Treated', 'CNT', 'Repulls', 'Deaths'].map((c) => h('th', null, c)))),
+        h('thead', null, h('tr', null, ['Pasture', 'Pulls', 'Treated', 'CNT', 'Repulls', 'Deaths'].map((c) => h('th', null, c)))),
         h('tbody', null, locRows.map(([loc, s]) => h('tr', null,
           h('td', null, loc), h('td', null, s.pulls), h('td', null, s.treated), h('td', null, s.cnt), h('td', null, s.repulls), h('td', null, s.deaths))))))));
   }
@@ -807,9 +1014,11 @@ function renderMore(main) {
     h('button', { class: 'btn', onclick: () => store.signOut() }, 'Sign out')));
 
   main.append(h('section', { class: 'card' },
-    h('label', { class: 'lbl' }, 'Doctoring location'),
+    h('label', { class: 'lbl' }, 'Pasture pulled from'),
     h('p', null, state.location || 'Not set'),
     h('button', { class: 'btn', onclick: () => pickLocation() }, 'Change')));
+
+  main.append(h('section', { class: 'card' }, doseChart(true)));
 
   if (store.mode !== 'demo') {
     main.append(h('section', { class: 'card' },
@@ -867,6 +1076,9 @@ function renderSettings() {
   const seasonIn = h('input', { class: 'input', inputmode: 'numeric', value: String(season()) });
   const locs = h('textarea', { class: 'input', rows: 5, placeholder: 'One per line' });
   locs.value = (s.locations || []).join('\n');
+  const herdsIn = h('textarea', { class: 'input', rows: 4, placeholder: 'One per line, e.g.\nPairs\nHeifers' });
+  herdsIn.value = (s.herds || []).join('\n');
+  const doseIns = DOSED_TREATMENTS.map((t) => [t, h('input', { class: 'input dose-in', placeholder: 'e.g. 1.1 mL per 100 lb, under the skin', value: (s.dosages || {})[t] || '' })]);
   const colors = h('textarea', { class: 'input', rows: 4, placeholder: 'blue 2026\ngreen 2025' });
   colors.value = seasonColors().filter(() => (s.tagColors || []).length).map((c) => `${c.color} ${c.year}`).join('\n');
   const aliases = h('textarea', { class: 'input', rows: 4, placeholder: 'drax = HR1 Draxxin\nthe blue stuff = LR1 Bio-Mycin' });
@@ -874,7 +1086,12 @@ function renderSettings() {
   return h('section', { class: 'card' },
     h('label', { class: 'lbl' }, 'Settings (admins)'),
     h('label', { class: 'lbl' }, 'Season'), seasonIn,
-    h('label', { class: 'lbl' }, 'Doctoring locations'), locs,
+    h('label', { class: 'lbl' }, 'Pastures'), locs,
+    h('p', { class: 'muted small' }, 'Cowboys pick these, or say the name into the mic.'),
+    h('label', { class: 'lbl' }, 'Herds (for death reports)'), herdsIn,
+    h('label', { class: 'lbl' }, 'Doses'),
+    h('p', { class: 'muted small' }, 'Cowboys see the dose when they pick a drug, and in the dosage chart. They can\'t change it.'),
+    h('div', { class: 'dose-grid' }, doseIns.map(([t, inp]) => h('label', { class: 'dose-row' }, h('span', null, t), inp))),
     h('label', { class: 'lbl' }, 'Tag colors and their year'), colors,
     h('p', { class: 'muted small' }, 'One per line, e.g. "blue 2026". Leave empty to show all common colors.'),
     h('label', { class: 'lbl' }, 'Drug nicknames for voice'), aliases,
@@ -894,6 +1111,8 @@ function renderSettings() {
       store.saveSettings({
         season: Number(seasonIn.value) || season(),
         locations: locs.value.split('\n').map((l) => l.trim()).filter(Boolean),
+        herds: herdsIn.value.split('\n').map((l) => l.trim()).filter(Boolean),
+        dosages: Object.fromEntries(doseIns.map(([t, inp]) => [t, inp.value.trim()]).filter(([, v]) => v)),
         tagColors,
         extraAliases,
       });
@@ -904,11 +1123,31 @@ function renderSettings() {
 // ---------- boot ----------
 export function boot(createStore) {
   store = createStore();
-  window.addEventListener('online', () => { state.online = true; render(); });
+  if (typeof indexedDB !== 'undefined') {
+    uploader = createUploader(
+      (path, blob, type) => store.uploadMedia(path, blob, type),
+      (n) => {
+        if (n === state.mediaWaiting) return;
+        state.mediaWaiting = n;
+        const badge = document.querySelector('header .badge');
+        if (badge) badge.replaceWith(syncBadge());
+      });
+    uploader.refresh();
+    setInterval(() => { if (state.access === 'ok') uploader.drain(); }, 60000);
+  }
+  // Fresh GPS every minute while the app is open, for the "you've moved" check.
+  setInterval(() => { if (state.access === 'ok' && document.visibilityState === 'visible') captureGPS(); }, 60000);
+  // Hide the bottom menu while the keyboard is up so it doesn't sit on top of what you're typing.
+  document.addEventListener('focusin', (e) => { if (/INPUT|TEXTAREA|SELECT/.test(e.target.tagName) && e.target.type !== 'file') document.body.classList.add('typing'); });
+  document.addEventListener('focusout', () => setTimeout(() => {
+    if (!document.activeElement || !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) document.body.classList.remove('typing');
+  }, 50));
+  window.addEventListener('online', () => { state.online = true; if (uploader) uploader.drain(); render(); });
   window.addEventListener('offline', () => { state.online = false; render(); });
   // Coming back from the email app after tapping the confirm link: check automatically.
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && state.access === 'verify' && verifyCheck) verifyCheck();
+    if (document.visibilityState === 'visible' && state.access === 'ok') { captureGPS(); if (uploader) uploader.drain(); }
   });
   window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installPrompt = e; });
   let renderQueued = false;
@@ -919,7 +1158,7 @@ export function boot(createStore) {
       renderQueued = false;
       // Don't wipe what someone is typing on the entry form; refresh only the live panels.
       const f = state.form;
-      const typing = f && (f.tagNum || f.temp || f.notes || state.editingId);
+      const typing = f && (f.tagNum || f.temp || f.notes || f.noTag || (f.files && f.files.length) || state.editingId);
       if (state.view === 'doctor' && state.access === 'ok' && document.getElementById('tagNum') && typing) {
         updateTagPanel();
         updateRecent();
@@ -941,7 +1180,7 @@ export function boot(createStore) {
       if (access === 'signedOut' && changed) { state.authMode = 'start'; state.authMsg = ''; }
       if (changed) {
         state.form = null;
-        if (access === 'ok') captureGPS();
+        if (access === 'ok') { captureGPS(); if (uploader) uploader.drain(); }
         render();
       }
     },
