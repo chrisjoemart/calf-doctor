@@ -9,7 +9,7 @@ import {
   initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
   collection, doc, setDoc, deleteDoc, onSnapshot, query, where, serverTimestamp,
 } from 'firebase/firestore';
-import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 import { firebaseConfig, OWNER_EMAILS } from './config.js';
 
 // Where the links in verification and password-reset emails send people back to.
@@ -183,6 +183,9 @@ export function createStore() {
     },
     mediaURL(path) {
       return getDownloadURL(ref(bucket(), path));
+    },
+    deleteMedia(path) {
+      return deleteObject(ref(bucket(), path));
     },
     saveSettings(s) {
       return setDoc(doc(db, 'settings', 'main'), s, { merge: true });

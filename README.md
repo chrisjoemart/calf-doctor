@@ -43,7 +43,7 @@ npm run build
 
 - `crew/{email}`: `{ name, role: 'admin' | 'cowboy', active }`
 - `settings/main`: `{ season, locations[] (pastures), herds[], dosages{treatment: text}, tagColors[{color, year}], extraAliases{nickname: treatment} }`
-- `entries/{id}`: one pull or death: tag (year + color + number, or `noTag`), diagnosis, temperature, treatment and the dose shown at the time, or cause + herd for deaths, pulled by, entered by, pasture pulled from (`location`), GPS, time, notes/description, `media[{path, type, size}]`, protocol warnings shown.
+- `entries/{id}`: one pull or death: tag (year + color + number, or `noTag`), diagnosis, temperature, treatment and the dose shown at the time, or cause + herd for deaths, pulled by, entered by, pasture pulled from (`location`), GPS, time, notes/description, `media[{path, type, size}]`, protocol warnings shown, `practice` (true for entries saved in practice mode; these are kept out of real reports, lookup and protocol history).
 - Storage `entries/{id}/…`: photos (shrunk to 1600 px on the phone) and videos for death reports.
 
 ## Costs

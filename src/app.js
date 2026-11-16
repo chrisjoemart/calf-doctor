@@ -10,7 +10,7 @@ import { analyze } from './protocol.js';
 import { buildIndex, computeReport, rangeFor, toCSV } from './reports.js';
 import { prepareFiles, createUploader } from './media.js';
 
-const VERSION = '0.2.0';
+const VERSION = '0.3.0';
 
 let store;
 const state = {
@@ -38,7 +38,33 @@ const state = {
   confirmMode: false,
   lastSaved: null,
   mediaWaiting: 0,
+  practice: lsGet('cd-practice', false),
+  allEntries: [],
 };
+
+// Practice mode: entries are saved with practice: true and live in their own world.
+// Real reports, lookup and protocol history never see them, and vice versa.
+function applyMode() {
+  state.entries = state.allEntries.filter((e) => !!e.practice === !!state.practice);
+  state.byTag = buildIndex(state.entries);
+}
+function setPractice(on) {
+  state.practice = !!on;
+  lsSet('cd-practice', state.practice);
+  state.form = null;
+  state.editingId = null;
+  state.lastSaved = null;
+  state.confirmMode = false;
+  applyMode();
+  render();
+  window.scrollTo(0, 0);
+}
+function practiceBar() {
+  if (!state.practice) return null;
+  return h('div', { class: 'practice-bar' },
+    h('span', null, h('strong', null, 'PRACTICE MODE'), ' · entries won\'t count'),
+    h('button', { class: 'link', onclick: () => setPractice(false) }, 'Turn off'));
+}
 let stopListening = null;
 let installPrompt = null;
 let uploader = null;
@@ -189,7 +215,7 @@ function setLocation(l) {
 // ---------- shell ----------
 function syncBadge() {
   if (store.mode === 'demo') return h('span', { class: 'badge demo' }, 'Demo');
-  const pending = state.entries.filter((e) => e._pending).length + state.mediaWaiting;
+  const pending = state.allEntries.filter((e) => e._pending).length + state.mediaWaiting;
   if (!state.online) return h('span', { class: 'badge off' }, pending ? `Offline · ${pending} waiting` : 'Offline');
   if (pending) return h('span', { class: 'badge sync' }, `Syncing ${pending}…`);
   return h('span', { class: 'badge ok' }, 'Synced');
@@ -213,7 +239,7 @@ function render() {
   const header = h('header', { class: 'top' },
     h('div', { class: 'brand' }, 'Calf Doctor'),
     syncBadge());
-  root.replaceChildren(header, store.mode === 'demo' ? h('div', { class: 'demo-bar' }, `Demo: data stays on this device. Signed in as ${nameOf(myEmail())}.`) : null, main, nav);
+  root.replaceChildren(...[header, store.mode === 'demo' ? h('div', { class: 'demo-bar' }, `Demo: data stays on this device. Signed in as ${nameOf(myEmail())}.`) : null, practiceBar(), main, nav].filter(Boolean));
   if (state.error) main.append(h('div', { class: 'warn' }, state.error));
   ({ doctor: renderDoctor, lookup: renderLookup, reports: renderReports, more: renderMore })[state.view](main);
 }
@@ -493,8 +519,8 @@ function renderDoctor(main) {
   main.append(h('div', { id: 'formError' }));
   const where = editing ? '' : state.location ? `at ${state.location}` : 'pick a pasture';
   main.append(h('div', { class: 'save-row' },
-    h('button', { class: 'btn save', onclick: () => save() },
-      h('span', null, editing ? 'Save changes' : 'Save'), where ? h('span', { class: 'save-sub' }, where) : null),
+    h('button', { class: 'btn save' + (state.practice && !editing ? ' practice' : ''), onclick: () => save() },
+      h('span', null, editing ? 'Save changes' : state.practice ? 'Save practice' : 'Save'), where ? h('span', { class: 'save-sub' }, where) : null),
     editing && canEdit(editing) ? h('button', { class: 'btn danger', onclick: () => deleteEntry(editing) }, 'Delete') : null,
     !editing ? h('button', { class: 'btn ghost', onclick: () => { state.form = blankForm(f.tagColor); state.confirmMode = false; render(); } }, 'Clear') : null));
 
@@ -556,9 +582,9 @@ function mediaGallery(list) {
       cell.classList.remove('loading');
       if (!url) { cell.replaceChildren(h('span', { class: 'muted small' }, 'Not uploaded yet')); return; }
       const isVid = (m.type || '').startsWith('video/');
-      cell.replaceChildren(h('a', { href: url, target: '_blank', rel: 'noopener' },
+      cell.replaceChildren(...[h('a', { href: url, target: '_blank', rel: 'noopener' },
         isVid ? h('video', { src: url, muted: true, playsinline: true, preload: 'metadata' }) : h('img', { src: url, alt: '' })),
-      isVid ? h('span', { class: 'thumb-tag' }, '▶ video') : null);
+      isVid ? h('span', { class: 'thumb-tag' }, '▶ video') : null].filter(Boolean));
     })();
   }
   return wrap;
@@ -720,6 +746,7 @@ function save(opts = {}) {
     warnings: a.warnings,
     override: a.warnings.length > 0,
     media: (editing && editing.media) || [],
+    practice: editing ? !!editing.practice : !!state.practice,
   };
   if (editing) {
     entry.editedBy = myEmail();
@@ -770,7 +797,7 @@ function cancelEdit() {
 function deleteEntry(e) {
   modal('Delete this entry?', h('p', null, `${tagLabel(e, season())} from ${fmtWhen(e.at)}. This can't be undone.`), [
     { label: 'Delete', kind: 'danger', fn: () => {
-      Promise.resolve(store.deleteEntry(e.id)).catch((err) => toast('Couldn\'t delete: ' + (err.code || err.message)));
+      removeEntry(e).catch((err) => toast('Couldn\'t delete: ' + (err.code || err.message)));
       state.editingId = null;
       state.form = blankForm(e.tagColor);
       toast('Entry deleted');
@@ -821,10 +848,10 @@ function applyUtterance(text, fromVoice) {
   const heard = document.getElementById('heard');
   const need = validate(f).map((e) => e.replace(/\.$/, ''));
   if (heard) {
-    heard.replaceChildren(h('span', { class: 'muted' }, `Heard: "${text}"`), h('br'),
+    heard.replaceChildren(...[h('span', { class: 'muted' }, `Heard: "${text}"`), h('br'),
       got.length ? `Got: ${got.join(' · ')}` : 'Couldn\'t pick anything out. Try again or tap below.',
       p.hr3Ambiguous ? h('div', { class: 'warn' }, 'HR3: say or tap NuFlor or Bio-Mycin.') : null,
-      need.length && got.length ? h('div', { class: 'muted small' }, `Still need: ${need.join('; ')}`) : null);
+      need.length && got.length ? h('div', { class: 'muted small' }, `Still need: ${need.join('; ')}`) : null].filter(Boolean));
   }
   if (fromVoice && got.length) setTimeout(() => listenForConfirm(), 350);
 }
@@ -975,6 +1002,19 @@ function renderReports(main) {
     breakdown('Treatments', rep.byTreatment),
     breakdown('Deaths by cause', rep.deathCauses)));
 
+  const doseRows = [...rep.byDose.entries()].filter(([, m]) => m.size > 1 || [...m.keys()].some(Boolean));
+  if (doseRows.length) {
+    main.append(h('section', { class: 'card' },
+      h('label', { class: 'lbl' }, 'Treatments by dose'),
+      h('div', { class: 'table-wrap' }, h('table', null,
+        h('thead', null, h('tr', null, ['Drug', 'Dose', 'Given', 'Repulls', 'Dates'].map((c) => h('th', null, c)))),
+        h('tbody', null, doseRows.flatMap(([t, m]) => [...m.entries()].sort((a, b) => a[1].first - b[1].first).map(([d, x], i) =>
+          h('tr', null, h('td', null, i === 0 ? t : ''), h('td', { class: d ? '' : 'muted' }, d || 'none recorded'),
+            h('td', null, x.pulls), h('td', null, x.repulls, h('span', { class: 'muted small' }, ` (${pct(x.repulls, x.pulls)})`)),
+            h('td', { class: 'small' }, x.first === x.last ? fmtDay(x.first) : `${fmtDay(x.first)} – ${fmtDay(x.last)}`))))))),
+      h('p', { class: 'muted small' }, 'Each drug counts as one drug no matter its dose. When the dose changes, this shows how the old and new doses compare.')));
+  }
+
   main.append(h('button', { class: 'btn', onclick: exportCSV }, 'Download season as CSV (opens in Sheets/Excel)'));
   main.append(h('p', { class: 'muted small' }, 'Draft definitions, to confirm with Christian. Repulls count against whoever did the earlier pull, with no time limit within the season.'));
 }
@@ -1000,7 +1040,7 @@ function breakdown(title, map) {
 function exportCSV() {
   const csv = toCSV(state.entries, nameOf);
   const blob = new Blob([csv], { type: 'text/csv' });
-  const a = h('a', { href: URL.createObjectURL(blob), download: `calf-doctor-${season()}-${dayKey(Date.now())}.csv` });
+  const a = h('a', { href: URL.createObjectURL(blob), download: `calf-doctor-${state.practice ? 'PRACTICE-' : ''}${season()}-${dayKey(Date.now())}.csv` });
   document.body.append(a);
   a.click();
   a.remove();
@@ -1018,6 +1058,13 @@ function renderMore(main) {
     h('p', null, state.location || 'Not set'),
     h('button', { class: 'btn', onclick: () => pickLocation() }, 'Change')));
 
+  main.append(h('section', { class: 'card' + (state.practice ? ' practice-card' : '') },
+    h('label', { class: 'lbl' }, 'Practice mode'),
+    h('p', { class: 'small' }, state.practice
+      ? 'On. Everything you save is marked practice and stays out of the real records, reports and tag lookup.'
+      : 'For trying the app out or training someone. Practice entries stay out of the real records, reports and tag lookup.'),
+    h('button', { class: 'btn' + (state.practice ? '' : ' primary'), onclick: () => setPractice(!state.practice) }, state.practice ? 'Turn off practice mode' : 'Turn on practice mode')));
+
   main.append(h('section', { class: 'card' }, doseChart(true)));
 
   if (store.mode !== 'demo') {
@@ -1030,12 +1077,57 @@ function renderMore(main) {
 
   main.append(renderCrew());
   if (isAdmin()) main.append(renderSettings());
+  if (isAdmin()) main.append(renderPracticeAdmin());
 
   main.append(h('section', { class: 'card' },
     h('label', { class: 'lbl' }, 'Data'),
     h('button', { class: 'btn', onclick: exportCSV }, 'Download season as CSV'),
     store.mode === 'demo' ? h('button', { class: 'btn ghost', onclick: () => store.resetDemo() }, 'Reset demo data') : null,
-    h('p', { class: 'muted small' }, `Season ${season()} · ${state.entries.length} entries · app v${VERSION}`)));
+    h('p', { class: 'muted small' }, `Season ${season()} · ${state.entries.length} ${state.practice ? 'practice ' : ''}entries · app v${VERSION}`)));
+}
+
+function renderPracticeAdmin() {
+  const practice = state.allEntries.filter((e) => e.practice);
+  const real = state.allEntries.filter((e) => !e.practice);
+  const dateIn = h('input', { class: 'input', type: 'date', value: dayKey(Date.now()) });
+  const countBefore = () => {
+    const cut = new Date(dateIn.value + 'T00:00').getTime();
+    return Number.isFinite(cut) ? real.filter((e) => e.at < cut) : [];
+  };
+  return h('section', { class: 'card' },
+    h('label', { class: 'lbl' }, 'Practice data (admin)'),
+    h('p', null, `${real.length} real entries · ${practice.length} practice entries`),
+    h('p', { class: 'small' }, 'Clean up testing from before practice mode existed: move every real entry from before this date to practice.'),
+    h('div', { class: 'row' }, dateIn,
+      h('button', { class: 'btn', onclick: () => {
+        const list = countBefore();
+        if (!list.length) { toast('No real entries before that date'); return; }
+        modal(`Move ${list.length} entries to practice?`, h('p', null, `Everything entered before ${fmtDay(new Date(dateIn.value + 'T00:00').getTime())} will drop out of the real records and reports. You can still see it in practice mode.`), [
+          { label: 'Move to practice', kind: 'primary', fn: () => {
+            const clean = (e) => Object.fromEntries(Object.entries(e).filter(([k]) => !k.startsWith('_')));
+            Promise.all(list.map((e) => store.saveEntry({ ...clean(e), practice: true })))
+              .then(() => toast(`Moved ${list.length} entries to practice`))
+              .catch((err) => toast('Couldn\'t move them all: ' + (err.code || err.message)));
+          } },
+        ]);
+      } }, 'Move')),
+    practice.length ? h('button', { class: 'btn danger', style: { marginTop: '12px' }, onclick: () => {
+      modal(`Delete ${practice.length} practice entries?`, h('p', null, 'This deletes every practice entry and its photos and videos, for everyone. Real entries aren\'t touched. This can\'t be undone.'), [
+        { label: 'Delete practice entries', kind: 'danger', fn: () => {
+          Promise.all(practice.map((e) => removeEntry(e)))
+            .then(() => toast('Practice entries deleted'))
+            .catch((err) => toast('Couldn\'t delete them all: ' + (err.code || err.message)));
+        } },
+      ]);
+    } }, `Delete all ${practice.length} practice entries`) : null);
+}
+
+// Deletes an entry and its photos/videos.
+async function removeEntry(e) {
+  for (const m of e.media || []) {
+    if (store.deleteMedia) await Promise.resolve(store.deleteMedia(m.path)).catch(() => {});
+  }
+  return store.deleteEntry(e.id);
 }
 
 function renderCrew() {
@@ -1187,8 +1279,8 @@ export function boot(createStore) {
     onCrew: (crew) => { state.crew = crew; queue(); },
     onSettings: (s) => { state.settings = s || {}; queue(); },
     onEntries: (list) => {
-      state.entries = list;
-      state.byTag = buildIndex(list);
+      state.allEntries = list;
+      applyMode();
       queue();
     },
     onError: (msg) => { state.error = msg; render(); },

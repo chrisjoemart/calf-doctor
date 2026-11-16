@@ -34,6 +34,8 @@ export function computeReport(entries, { from = 0, to = Infinity } = {}) {
   const totals = blank();
   const byDiagnosis = new Map();
   const byTreatment = new Map();
+  // Same drug, split by the dose that was showing when it was given: { pulls, repulls }.
+  const byDose = new Map();
   const deathCauses = new Map();
   const daily = new Map();
 
@@ -55,6 +57,17 @@ export function computeReport(entries, { from = 0, to = Infinity } = {}) {
       }
       if (p.diagnosis) byDiagnosis.set(p.diagnosis, (byDiagnosis.get(p.diagnosis) || 0) + 1);
       byTreatment.set(p.treatment || 'Other', (byTreatment.get(p.treatment || 'Other') || 0) + 1);
+      if (treated) {
+        const tk = p.treatment || 'Other';
+        if (!byDose.has(tk)) byDose.set(tk, new Map());
+        const dk2 = p.dose || '';
+        const d = byDose.get(tk).get(dk2) || { pulls: 0, repulls: 0, first: p.at, last: p.at };
+        d.pulls++;
+        if (next) d.repulls++;
+        d.first = Math.min(d.first, p.at);
+        d.last = Math.max(d.last, p.at);
+        byDose.get(tk).set(dk2, d);
+      }
       const dk = dayKey(p.at);
       daily.set(dk, (daily.get(dk) || 0) + 1);
     });
@@ -70,7 +83,7 @@ export function computeReport(entries, { from = 0, to = Infinity } = {}) {
       }
     }
   }
-  return { cowboys, locations, totals, byDiagnosis, byTreatment, deathCauses, daily };
+  return { cowboys, locations, totals, byDiagnosis, byTreatment, byDose, deathCauses, daily };
 }
 
 export function rangeFor(key, now = Date.now()) {

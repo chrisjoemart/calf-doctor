@@ -2,7 +2,7 @@
 import { lsGet, lsSet, uid, tagKey, startOfDay } from './util.js';
 import { HR_STEPS, CNT } from './constants.js';
 import { hrIndex } from './protocol.js';
-import { idbPut, idbGet, KEEP_STORE } from './media.js';
+import { idbPut, idbGet, idbDel, KEEP_STORE } from './media.js';
 
 const KEY = 'calfdoctor-demo-v2';
 
@@ -154,6 +154,9 @@ export function createStore() {
       const it = await idbGet(KEEP_STORE, path);
       if (!it) throw new Error('not found');
       return URL.createObjectURL(it.blob);
+    },
+    async deleteMedia(path) {
+      await idbDel(KEEP_STORE, path);
     },
     async saveSettings(s) {
       data.settings = { ...data.settings, ...s };
