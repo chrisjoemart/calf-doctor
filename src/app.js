@@ -107,7 +107,7 @@ function defaultPulledBy() {
 
 function blankForm(keepColor) {
   return {
-    tagNum: '', noTag: false, diagnosis: '', temp: '', treatment: '', cause: '', notes: '', herd: '',
+    tagNum: '', noTag: false, noTemp: false, diagnosis: '', temp: '', treatment: '', cause: '', notes: '', herd: '',
     pulledBy: defaultPulledBy(), files: [], media: [],
   };
 }
@@ -188,19 +188,23 @@ function modal(title, body, actions = []) {
 }
 
 function pickLocation(then, opts = {}) {
-  const locs = pastures();
+  const locs = [...pastures()];
   const other = h('input', { class: 'input', placeholder: 'Or type a pasture', value: '' });
   let close;
-  const choose = (l) => { setLocation(l); close(); then && then(); };
+  // opts.onPick: change one entry's pasture (editing) without touching the pasture new entries get.
+  const set = opts.onPick || setLocation;
+  const current = opts.onPick ? opts.current : state.location;
+  const choose = (l) => { set(l); close(); then && then(); };
+  if (current && !locs.includes(current)) locs.push(current);
   const body = h('div', null,
     opts.warning ? h('div', { class: 'warn', style: { marginTop: 0, marginBottom: '10px' } }, opts.warning) : null,
-    h('p', { class: 'muted' }, 'Every entry gets this pasture until you change it. You can also say the pasture name into the mic.'),
-    state.location && opts.offerSame ? h('button', { class: 'btn big primary', style: { marginBottom: '12px' }, onclick: () => choose(state.location) }, `✓ Still ${state.location}`) : null,
+    h('p', { class: 'muted' }, opts.onPick ? 'Changes the pasture on this entry only.' : 'Every entry gets this pasture until you change it. You can also say the pasture name into the mic.'),
+    current && opts.offerSame ? h('button', { class: 'btn big primary', style: { marginBottom: '12px' }, onclick: () => choose(current) }, `✓ Still ${current}`) : null,
     h('div', { class: 'chips' },
-      locs.filter((l) => !(opts.offerSame && l === state.location)).map((l) => h('button', { class: 'chip' + (l === state.location ? ' on' : ''), onclick: () => choose(l) }, l))),
+      locs.filter((l) => !(opts.offerSame && l === current)).map((l) => h('button', { class: 'chip' + (l === current ? ' on' : ''), onclick: () => choose(l) }, l))),
     locs.length ? null : h('p', { class: 'muted' }, 'No pastures set up yet. An admin can add them under More → Settings.'),
     other);
-  close = modal(opts.title || 'Pasture pulled from', body, [{ label: 'Use typed pasture', kind: 'primary', fn: () => { if (!other.value.trim()) return false; setLocation(other.value.trim()); then && then(); } }]);
+  close = modal(opts.title || 'Pasture pulled from', body, [{ label: 'Use typed pasture', kind: 'primary', fn: () => { if (!other.value.trim()) return false; set(other.value.trim()); then && then(); } }]);
 }
 
 function setLocation(l) {
@@ -441,8 +445,11 @@ function renderDoctor(main) {
   main.append(h('section', { class: 'card pasture' },
     h('div', { class: 'pasture-row' },
       h('div', null, h('div', { class: 'lbl' }, 'Pasture pulled from'),
-        h('div', { class: 'pasture-name' }, editing ? editing.location || '—' : state.location || 'Not set')),
-      editing ? null : h('button', { class: 'btn small', onclick: () => pickLocation() }, state.location ? 'Change' : 'Set')),
+        h('div', { class: 'pasture-name' }, editing ? f.location || '—' : state.location || 'Not set'),
+        editing && f.location !== (editing.location || '') ? h('div', { class: 'muted small' }, `was ${editing.location || '—'}`) : null),
+      editing
+        ? h('button', { class: 'btn small', onclick: () => pickLocation(null, { current: f.location, onPick: (l) => { f.location = l; render(); } }) }, 'Change')
+        : h('button', { class: 'btn small', onclick: () => pickLocation() }, state.location ? 'Change' : 'Set')),
     editing ? null : h('div', { id: 'pastureWarn' }, movedWarning())));
 
   // Voice
@@ -457,7 +464,7 @@ function renderDoctor(main) {
       : h('p', { class: 'small voice-help' }, 'To talk: tap the box below, tap the ', h('strong', null, '🎤'), ' on your keyboard, say it, then tap ', h('strong', null, 'Fill'), '.'),
     heard,
     h('div', { class: 'row' }, say, h('button', { class: 'btn', onclick: () => { applyUtterance(say.value, false); say.value = ''; } }, 'Fill')),
-    h('p', { class: 'muted small say-hint' }, 'Any order: tag number, temp, drug, diagnosis, pasture. "4.2" means 104.2. Say "no tag" for an untagged calf.'),
+    h('p', { class: 'muted small say-hint' }, 'Any order: tag number, temp, drug, diagnosis, pasture. "4.2" means 104.2. Say "no tag" for an untagged calf, "no temp" if you didn\'t take one.'),
     state.confirmMode ? h('div', { class: 'confirm-bar' }, 'Check it below. ', browserVoice() ? 'Say "yes" or tap Save.' : 'Then tap Save.') : null));
 
   // Tag
@@ -490,7 +497,11 @@ function renderDoctor(main) {
       oninput: () => { f.temp = temp.value; showPreview(); updateTagPanel(); },
       onblur: () => { const t = normalizeTemp(temp.value); if (Number.isFinite(t)) { temp.value = String(t); f.temp = temp.value; showPreview(); updateTagPanel(); } } });
     main.append(h('section', { class: 'card' },
-      h('label', { class: 'lbl' }, 'Temperature °F'), h('div', { class: 'temp-wrap' }, temp, preview)));
+      h('div', { class: 'lbl-row' }, h('label', { class: 'lbl' }, 'Temperature °F'),
+        h('button', { class: 'chip notemp' + (f.noTemp ? ' on' : ''), id: 'noTemp', onclick: () => { f.noTemp = !f.noTemp; if (f.noTemp) f.temp = ''; render(); } }, f.noTemp ? '✓ No temp' : 'No temp')),
+      f.noTemp
+        ? h('p', { class: 'muted' }, 'Saving without a temperature.')
+        : h('div', { class: 'temp-wrap' }, temp, preview)));
     showPreview();
     main.append(h('section', { class: 'card' },
       h('label', { class: 'lbl' }, 'Treatment'),
@@ -598,7 +609,7 @@ function updateRecent() {
 function entryRow(e) {
   const line = e.kind === 'death'
     ? `Death · ${e.cause || 'cause ?'}${e.herd ? ' · ' + e.herd : ''}${e.media && e.media.length ? ' · 📷 ' + e.media.length : ''}`
-    : `${e.treatment || '—'}${e.temp ? ' · ' + e.temp + '°' : ''}${e.diagnosis ? ' · ' + e.diagnosis : ''}`;
+    : `${e.treatment || '—'}${e.temp ? ' · ' + e.temp + '°' : ' · no temp'}${e.diagnosis ? ' · ' + e.diagnosis : ''}`;
   return h('button', { class: 'entry' + (e.kind === 'death' ? ' dead' : '') + (e.treatment === CNT ? ' cnt' : ''), onclick: () => (canEdit(e) ? startEdit(e) : showEntry(e)) },
     h('div', { class: 'entry-top' },
       h('strong', null, tagLabel(e, season())),
@@ -610,7 +621,7 @@ function entryRow(e) {
 function showEntry(e) {
   modal(tagLabel(e, season()), h('div', null,
     h('p', null, fmtWhen(e.at)),
-    h('p', null, e.kind === 'death' ? `Death: ${e.cause}${e.herd ? ' · herd: ' + e.herd : ''}` : `${e.diagnosis || ''} ${e.temp ? e.temp + '°F' : ''} ${e.treatment || ''}`),
+    h('p', null, e.kind === 'death' ? `Death: ${e.cause}${e.herd ? ' · herd: ' + e.herd : ''}` : `${e.diagnosis || ''} ${e.temp ? e.temp + '°F' : 'no temp'} ${e.treatment || ''}`),
     e.dose ? h('p', { class: 'small' }, `Dose: ${e.dose}`) : null,
     h('p', { class: 'muted' }, `${e.kind === 'death' ? 'Found' : 'Pulled'} by ${nameOf(e.pulledBy)} · entered by ${nameOf(e.enteredBy)}${e.location ? ' · ' + e.location : ''}`),
     e.notes ? h('p', null, e.notes) : null,
@@ -628,7 +639,7 @@ function currentAnalysis() {
   const f = state.form;
   const key = currentKey();
   const hist = key ? historyFor(key, state.editingId) : [];
-  const t = normalizeTemp(f.temp);
+  const t = f.noTemp ? null : normalizeTemp(f.temp);
   return { hist, a: analyze(hist, { kind: formKind(f), temp: Number.isFinite(t) ? t : null, treatment: f.treatment, diagnosis: f.diagnosis }) };
 }
 
@@ -674,8 +685,9 @@ function validate(f) {
     if (!f.cause) errs.push('Pick a cause of death.');
     if (herds().length && !f.herd) errs.push('Pick the herd (or "Not sure").');
   } else {
-    const t = normalizeTemp(f.temp);
-    if (t === null) errs.push('Temperature is required on every pull.');
+    const t = f.noTemp ? null : normalizeTemp(f.temp);
+    if (f.noTemp) { /* no temperature taken */ }
+    else if (t === null) errs.push('Enter the temperature, or tap "No temp".');
     else if (!Number.isFinite(t) || t < 95 || t > 110) errs.push('That temperature looks off (expected 95–110°F).');
     if (!f.treatment) errs.push('Pick a treatment (or Check No Treatment).');
   }
@@ -709,7 +721,7 @@ function save(opts = {}) {
   }
   const { a } = currentAnalysis();
   const kind = formKind(f);
-  const t = normalizeTemp(f.temp);
+  const t = f.noTemp ? null : normalizeTemp(f.temp);
   const id = editing ? editing.id : uid();
   const treatment = kind === 'death' ? '' : f.treatment;
   const keepDose = editing && editing.treatment === treatment;
@@ -723,7 +735,8 @@ function save(opts = {}) {
     tagKey: f.noTag ? noTagKey(id) : tagKey(editing ? editing.season : season(), f.tagNum),
     kind,
     diagnosis: f.diagnosis || '',
-    temp: kind === 'death' ? (Number.isFinite(t) ? t : null) : t,
+    temp: Number.isFinite(t) ? t : null,
+    noTemp: kind === 'pull' && !!f.noTemp,
     treatment,
     dose: keepDose ? editing.dose || '' : doseFor(treatment),
     cause: kind === 'death' ? f.cause : '',
@@ -731,7 +744,7 @@ function save(opts = {}) {
     notes: f.notes.trim(),
     pulledBy: f.pulledBy,
     enteredBy: editing ? editing.enteredBy : myEmail(),
-    location: editing ? editing.location : state.location,
+    location: editing ? f.location : state.location,
     gps: editing ? editing.gps || null : state.gps ? { lat: state.gps.lat, lng: state.gps.lng, acc: state.gps.acc } : null,
     at: editing ? editing.at : Date.now(),
     warnings: a.warnings,
@@ -773,7 +786,8 @@ function startEdit(e) {
     tagNum: e.tagNum || '', noTag: !!e.noTag,
     diagnosis: e.kind === 'death' ? 'Death' : e.diagnosis || '',
     temp: e.temp === null || e.temp === undefined ? '' : String(e.temp), treatment: e.treatment || '', cause: e.cause || '',
-    notes: e.notes || '', pulledBy: e.pulledBy, herd: e.herd || '', files: [],
+    noTemp: e.kind === 'pull' && (e.temp === null || e.temp === undefined),
+    notes: e.notes || '', pulledBy: e.pulledBy, herd: e.herd || '', files: [], location: e.location || '',
   };
   render();
   window.scrollTo(0, 0);
@@ -813,21 +827,22 @@ function applyUtterance(text, fromVoice) {
   const p = parseUtterance(text, voiceCtx());
   if (p.noTag) { f.noTag = true; f.tagNum = ''; }
   if (p.tagNum) { f.tagNum = p.tagNum; f.noTag = false; }
+  if (p.noTemp && !p.isDeath) { f.noTemp = true; f.temp = ''; }
   if (p.isDeath) {
     f.diagnosis = 'Death';
     if (p.cause) f.cause = p.cause;
     if (p.herd) f.herd = p.herd;
   } else {
     if (p.diagnosis) f.diagnosis = p.diagnosis;
-    if (p.temp !== null) f.temp = String(p.temp);
+    if (p.temp !== null) { f.temp = String(p.temp); f.noTemp = false; }
     if (p.treatment) f.treatment = p.treatment;
   }
   if (p.pulledBy) f.pulledBy = p.pulledBy;
   if (p.notes) f.notes = f.notes ? f.notes + '; ' + p.notes : p.notes;
-  if (p.location && !state.editingId) setLocation(p.location);
+  if (p.location) { if (state.editingId) f.location = p.location; else setLocation(p.location); }
   const got = [
     p.noTag ? 'No tag' : p.tagNum ? (seasonColor() ? `${cap(seasonColor())} ${p.tagNum}` : `Tag ${p.tagNum}`) : '',
-    p.temp !== null ? p.temp + '°' : '',
+    p.temp !== null ? p.temp + '°' : p.noTemp && !p.isDeath ? 'No temp' : '',
     p.treatment + (p.autoCNT ? ` (under ${TEMP_THRESHOLD}°)` : ''),
     p.diagnosis, p.cause, p.herd ? 'Herd: ' + p.herd : '',
     p.location ? '📍 ' + p.location : p.samePlace ? '📍 same pasture' : '',
@@ -1236,7 +1251,7 @@ export function boot(createStore) {
       renderQueued = false;
       // Don't wipe what someone is typing on the entry form; refresh only the live panels.
       const f = state.form;
-      const typing = f && (f.tagNum || f.temp || f.notes || f.noTag || (f.files && f.files.length) || state.editingId);
+      const typing = f && (f.tagNum || f.temp || f.notes || f.noTag || f.noTemp || (f.files && f.files.length) || state.editingId);
       if (state.view === 'doctor' && state.access === 'ok' && document.getElementById('tagNum') && typing) {
         updateTagPanel();
         updateRecent();

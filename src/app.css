@@ -199,7 +199,7 @@ body.typing { padding-bottom: 16px; }
 .pasture-name { font-size: 21px; font-weight: 800; }
 .lbl-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .lbl-row .lbl { margin: 0; }
-.chip.notag { min-height: 40px; padding: 6px 12px; font-size: 15px; }
+.chip.notag, .chip.notemp { min-height: 40px; padding: 6px 12px; font-size: 15px; }
 .say-hint { margin: 8px 0 0; }
 .voice-help { margin: 0 0 6px; }
 .temp-wrap { display: flex; align-items: center; gap: 12px; }

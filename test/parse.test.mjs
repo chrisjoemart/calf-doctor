@@ -84,6 +84,11 @@ expect('section twelve blue 42 104.2', { location: 'Section 12', tagNum: '42' })
 expect('blue 42 104.2 drax same pasture', { samePlace: true, location: '' });
 expect('no tag 104.2 drax', { noTag: true, tagNum: '', temp: 104.2 });
 expect('slick calf 4.5 drax', { noTag: true, tagNum: '', temp: 104.5 });
+expect('blue 42 no temp drax', { tagNum: '42', noTemp: true, temp: null, treatment: 'HR1 Draxxin' });
+expect("42 didn't temp bloat tube", { tagNum: '42', noTemp: true, temp: null, treatment: 'Tube' });
+expect('no tag no temp drax', { noTag: true, noTemp: true, tagNum: '', temp: null });
+expect('blue 42 no temperature respiratory', { tagNum: '42', noTemp: true, treatment: '' });
+expect('blue 42 104.2 drax', { noTemp: false });
 expect('no tag dead wolf heifers', { noTag: true, isDeath: true, cause: 'Wolf', herd: 'Heifers' });
 expect('blue 42 dead bear pairs description chewed up by the creek', { herd: 'Pairs', cause: 'Bear', notes: 'chewed up by the creek' });
 
@@ -92,6 +97,13 @@ check('yes/no', () => {
 });
 
 // --- protocol ---
+check('no temp: no temperature warnings, HR order still checked', () => {
+  const h = [{ kind: 'pull', treatment: 'HR1 Draxxin', at: 1 }];
+  const a = analyze(h, { kind: 'pull', temp: null, treatment: 'HR1 Draxxin', diagnosis: '' });
+  assert.ok(a.warnings.some((w) => /already had/.test(w)));
+  assert.ok(!a.warnings.some((w) => /°F/.test(w)));
+});
+
 check('HR1 again suggests HR2', () => {
   const a = analyze([{ kind: 'pull', treatment: 'HR1 Draxxin', at: 1 }], { kind: 'pull', temp: 104.5, treatment: 'HR1 Draxxin', diagnosis: 'Respiratory' });
   assert.deepEqual(a.suggestions, ['HR2 Baytril']);

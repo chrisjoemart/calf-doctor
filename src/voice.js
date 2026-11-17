@@ -1,6 +1,6 @@
 import {
   TREATMENT_ALIASES, DIAGNOSIS_ALIASES, CAUSE_ALIASES, DEATH_WORDS, COLOR_ALIASES, HR3_BARE,
-  NO_TAG_WORDS, SAME_PLACE_WORDS, CNT, TEMP_THRESHOLD,
+  NO_TAG_WORDS, NO_TEMP_WORDS, SAME_PLACE_WORDS, CNT, TEMP_THRESHOLD,
 } from './constants.js';
 import { normalizeTemp } from './util.js';
 
@@ -125,7 +125,7 @@ const isNumTok = (t) => /^\d+(\.\d+)?$/.test(t || '');
  */
 export function parseUtterance(raw, ctx = {}) {
   const result = {
-    raw, tagColor: '', tagNum: '', noTag: false, temp: null, treatment: '', diagnosis: '', cause: '',
+    raw, tagColor: '', tagNum: '', noTag: false, noTemp: false, temp: null, treatment: '', diagnosis: '', cause: '',
     isDeath: false, pulledBy: '', notes: '', autoCNT: false, location: '', samePlace: false, herd: '',
     hr3Ambiguous: false,
   };
@@ -174,6 +174,9 @@ export function parseUtterance(raw, ctx = {}) {
   s = w.text;
   w = hasWord(s, NO_TAG_WORDS);
   result.noTag = w.hit;
+  s = w.text;
+  w = hasWord(s, NO_TEMP_WORDS);
+  result.noTemp = w.hit;
   s = w.text;
 
   const diag = takePhrase(s, DIAGNOSIS_ALIASES);
@@ -323,7 +326,7 @@ export function parseUtterance(raw, ctx = {}) {
       }
     }
   }
-  result.temp = Number.isFinite(temp) ? temp : null;
+  result.temp = Number.isFinite(temp) && !result.noTemp ? temp : null;
 
   // Christian's rule: under 103.5°F and nothing named -> Check No Treatment.
   if (!result.isDeath && !result.treatment && !result.hr3Ambiguous && result.temp !== null && result.temp < TEMP_THRESHOLD &&

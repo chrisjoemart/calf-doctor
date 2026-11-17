@@ -70,6 +70,7 @@ export const CAUSE_ALIASES = {
 
 export const DEATH_WORDS = ['dead', 'death', 'died', 'killed', 'kill', 'carcass'];
 export const NO_TAG_WORDS = ['no tag', 'notag', 'untagged', 'no tags', 'slick', 'tag missing', 'lost tag', 'missing tag'];
+export const NO_TEMP_WORDS = ['no temp', 'no temperature', 'no temps', 'didn\'t temp', 'didnt temp', 'did not temp', 'not temped', 'didn\'t take temp', 'didnt take temp', 'did not take temp', 'didn\'t take a temp', 'didnt take a temp', 'skip temp', 'without temp', 'without a temp'];
 export const SAME_PLACE_WORDS = ['same pasture', 'same place', 'same spot', 'same location', "haven't moved", 'havent moved', 'have not moved', 'still here'];
 
 export const COLOR_ALIASES = {
