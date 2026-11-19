@@ -1,8 +1,8 @@
-import { HR_STEPS, LEGACY_TREATMENTS, CNT, TEMP_THRESHOLD } from './constants.js';
+import { HR_STEPS, LEGACY_HR, RENAMED, CNT, TEMP_THRESHOLD } from './constants.js';
 
 // DRAFT protocol, built from what Christian has said so far:
 //  - under 103.5°F: no medication, record Check No Treatment
-//  - respiratory goes HR1 Draxxin -> HR2 Baytril -> HR3 (NuFlor or Bio-Mycin)
+//  - respiratory goes Draxxin -> Baytril -> NuFlor
 //  - Bull Castrated -> castration, Bloat -> tube, Brainer -> thiamine
 // Warnings only suggest. They never stop a save.
 
@@ -17,11 +17,41 @@ export const defaultTreatmentFor = (diagnosis) => DIAG_DEFAULT[diagnosis] || '';
 const stepName = (i) => HR_STEPS[i].join(' or ');
 
 export function hrIndex(treatment) {
-  const i = HR_STEPS.findIndex((s) => s.includes(treatment));
-  if (i >= 0) return i;
-  return treatment in LEGACY_TREATMENTS ? LEGACY_TREATMENTS[treatment] : -1;
+  if (treatment in LEGACY_HR) return LEGACY_HR[treatment];
+  return HR_STEPS.findIndex((st) => st.includes(treatment));
+}
+// An entry's step, remembering what an old drug name meant when it was saved.
+const hrOf = (e) => (Number.isInteger(e._hr) ? e._hr : hrIndex(e.treatment));
+
+export const drugName = (t) => (t && RENAMED[t]) || t || '';
+
+/**
+ * Shows entries saved under the old drug names (HR1 Draxxin, LR1 Bio-Mycin...) under the new
+ * ones. The saved name is kept in _raw (never written back unless unchanged) and the
+ * respiratory step in _hr.
+ */
+export function normalizeEntry(e) {
+  const t = e.treatment;
+  const d = e.drug;
+  if (!(t && RENAMED[t]) && !(d && RENAMED[d])) return e;
+  const out = { ...e };
+  if (t && RENAMED[t]) {
+    out.treatment = RENAMED[t];
+    out._raw = t;
+    if (t in LEGACY_HR) out._hr = LEGACY_HR[t];
+  }
+  if (d && RENAMED[d]) out.drug = RENAMED[d];
+  return out;
 }
 
+// Admin doses were saved under the old names; use the new name's dose once one is saved.
+export function doseFrom(dosages, t) {
+  const ds = dosages || {};
+  if (Object.prototype.hasOwnProperty.call(ds, t)) return String(ds[t] || '').trim();
+  const old = Object.keys(RENAMED).filter((k) => RENAMED[k] === t && !k.startsWith('HR3 Bio'));
+  for (const k of old) if (ds[k]) return String(ds[k]).trim();
+  return '';
+}
 /**
  * history: earlier entries for this tag (any order), excluding the one being edited.
  * form: { kind, temp (number|null), treatment, diagnosis }
@@ -46,8 +76,8 @@ export function analyze(history, form) {
   let prevHR = -1;
   let prevName = '';
   for (const e of pulls) {
-    const i = hrIndex(e.treatment);
-    if (i >= prevHR && i >= 0) { prevHR = i; prevName = e.treatment; }
+    const i = hrOf(e);
+    if (i >= prevHR && i >= 0) { prevHR = i; prevName = drugName(e.treatment); }
   }
   const t = form.temp;
   const diag = form.diagnosis;

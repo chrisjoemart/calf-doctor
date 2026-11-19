@@ -1,13 +1,13 @@
 import {
   DIAGNOSES, TREATMENTS, DOSED_TREATMENTS, CAUSES, CNT, TEMP_THRESHOLD, MOVED_WARN_MILES, COLOR_HEX,
-  ORIGINS, IMPLANT_PRODUCTS, MASS_TEMP, MASS_SWITCH_SHARE, OUT_PASTURE, WEIGH_STAGES,
+  RENAMED, ORIGINS, IMPLANT_PRODUCTS, MASS_TEMP, MASS_SWITCH_SHARE, OUT_PASTURE, WEIGH_STAGES,
 } from './constants.js';
 import {
   h, uid, cap, fmtWhen, fmtDay, startOfDay, dayKey, pct, lsGet, lsSet, tagKey, tagLabel, normalizeTemp,
   noTagKey, milesBetween, isIOS, isStandalone, cleanTagNum,
 } from './util.js';
 import { parseUtterance, listen, speechSupported, isYes, isNo } from './voice.js';
-import { analyze } from './protocol.js';
+import { analyze, normalizeEntry, doseFrom, drugName } from './protocol.js';
 import { buildIndex, computeReport, rangeFor, toCSV } from './reports.js';
 import { prepareFiles, createUploader } from './media.js';
 import {
@@ -105,7 +105,7 @@ const colorSwatch = (c) => h('span', { class: 'swatch', style: { background: COL
 
 const pastures = () => (Array.isArray(state.settings.locations) ? state.settings.locations : []);
 const herds = () => (Array.isArray(state.settings.herds) ? state.settings.herds : []);
-const doseFor = (t) => ((state.settings.dosages || {})[t] || '').trim();
+const doseFor = (t) => doseFrom(state.settings.dosages, t);
 // iPhone home-screen apps can't use the browser's voice recognition; the keyboard mic still works.
 const browserVoice = () => speechSupported() && !(isIOS() && isStandalone());
 
@@ -762,7 +762,8 @@ function save(opts = {}) {
     diagnosis: f.diagnosis || '',
     temp: Number.isFinite(t) ? t : null,
     noTemp: kind === 'pull' && !!f.noTemp,
-    treatment,
+    // Unchanged on an old entry: keep the name it was saved under.
+    treatment: keepDose && editing._raw ? editing._raw : treatment,
     dose: keepDose ? editing.dose || '' : doseFor(treatment),
     cause: kind === 'death' ? f.cause : '',
     herd: kind === 'death' ? f.herd || '' : '',
@@ -840,7 +841,7 @@ function deleteEntry(e) {
 function voiceCtx() {
   return {
     crew: activeCrew(),
-    extraTreatmentAliases: state.settings.extraAliases || {},
+    extraTreatmentAliases: Object.fromEntries(Object.entries(state.settings.extraAliases || {}).map(([k, v]) => [k, drugName(v)])),
     locations: pastures(),
     herds: herds(),
   };
@@ -879,7 +880,6 @@ function applyUtterance(text, fromVoice) {
   if (heard) {
     heard.replaceChildren(...[h('span', { class: 'muted' }, `Heard: "${text}"`), h('br'),
       got.length ? `Got: ${got.join(' · ')}` : 'Couldn\'t pick anything out. Try again or tap below.',
-      p.hr3Ambiguous ? h('div', { class: 'warn' }, 'HR3: say or tap NuFlor or Bio-Mycin.') : null,
       need.length && got.length ? h('div', { class: 'muted small' }, `Still need: ${need.join('; ')}`) : null].filter(Boolean));
   }
   if (fromVoice && got.length) setTimeout(() => listenForConfirm(), 350);
@@ -1163,13 +1163,13 @@ function renderSettings() {
   locs.value = (s.locations || []).join('\n');
   const herdsIn = h('textarea', { class: 'input', rows: 4, placeholder: 'One per line, e.g.\nPairs\nHeifers' });
   herdsIn.value = (s.herds || []).join('\n');
-  const doseIns = DOSED_TREATMENTS.map((t) => [t, h('input', { class: 'input dose-in', placeholder: 'e.g. 1.1 mL per 100 lb, under the skin', value: (s.dosages || {})[t] || '' })]);
+  const doseIns = DOSED_TREATMENTS.map((t) => [t, h('input', { class: 'input dose-in', placeholder: 'e.g. 1.1 mL per 100 lb, under the skin', value: doseFrom(s.dosages, t) })]);
   const originsIn = h('textarea', { class: 'input', rows: 6, placeholder: 'One per line' });
   originsIn.value = origins().join('\n');
   const implantsIn = h('textarea', { class: 'input', rows: 3, placeholder: 'One per line' });
   implantsIn.value = implantProducts().join('\n');
-  const aliases = h('textarea', { class: 'input', rows: 4, placeholder: 'drax = HR1 Draxxin\nthe blue stuff = LR1 Bio-Mycin' });
-  aliases.value = Object.entries(s.extraAliases || {}).map(([k, v]) => `${k} = ${v}`).join('\n');
+  const aliases = h('textarea', { class: 'input', rows: 4, placeholder: 'drax = Draxxin\nthe blue stuff = Bio-Mycin' });
+  aliases.value = Object.entries(s.extraAliases || {}).map(([k, v]) => `${k} = ${drugName(v)}`).join('\n');
   return h('section', { class: 'card' },
     h('label', { class: 'lbl' }, 'Settings (admins)'),
     h('label', { class: 'lbl' }, 'Season'), seasonIn,
@@ -1191,7 +1191,8 @@ function renderSettings() {
       const bad = [];
       for (const line of aliases.value.split('\n')) {
         if (!line.trim()) continue;
-        const [k, v] = line.split('=').map((x) => (x || '').trim());
+        const [k, v0] = line.split('=').map((x) => (x || '').trim());
+        const v = drugName(Object.keys(RENAMED).find((o) => o.toLowerCase() === (v0 || '').toLowerCase()) || v0);
         const match = TREATMENTS.find((t) => t.toLowerCase() === (v || '').toLowerCase()) || TREATMENTS.find((t) => t.toLowerCase().startsWith((v || '').toLowerCase().slice(0, 3)) && v);
         if (k && match) extraAliases[k.toLowerCase()] = match;
         else bad.push(line);
@@ -1203,7 +1204,7 @@ function renderSettings() {
         herds: herdsIn.value.split('\n').map((l) => l.trim()).filter(Boolean),
         origins: originsIn.value.split('\n').map((l) => l.trim()).filter(Boolean),
         implants: implantsIn.value.split('\n').map((l) => l.trim()).filter(Boolean),
-        dosages: Object.fromEntries(doseIns.map(([t, inp]) => [t, inp.value.trim()]).filter(([, v]) => v)),
+        dosages: Object.fromEntries(doseIns.map(([t, inp]) => [t, inp.value.trim()])),
         tagColors: s.tagColors || [],
         extraAliases,
       });
@@ -1293,7 +1294,10 @@ const JOB_NAME = Object.fromEntries(JOBS.map(([k, l]) => [k, l]));
 
 function chuteState() {
   if (!state.chute) state.chute = { job: 'process' };
-  return state.chute;
+  const c = state.chute;
+  if (c.process) c.process.drug = drugName(c.process.drug);
+  if (c.mass) c.mass.drug = drugName(c.mass.drug);
+  return c;
 }
 
 function renderChute(main) {
@@ -1310,7 +1314,7 @@ function renderChute(main) {
 
 function setupProcess(main) {
   const c = chuteState();
-  const s = c.process || (c.process = { purchaseDate: '', origin: '', originOther: '', invoice: '', pasture: '', drug: 'HR1 Draxxin', treatAll: false, startTag: '' });
+  const s = c.process || (c.process = { purchaseDate: '', origin: '', originOther: '', invoice: '', pasture: '', drug: 'Draxxin', treatAll: false, startTag: '' });
   const date = h('input', { class: 'input', type: 'date', id: 'purchaseDate', value: s.purchaseDate, onchange: () => { s.purchaseDate = date.value; saveChute(); } });
   const other = h('input', { class: 'input', placeholder: 'Where from?', value: s.originOther, oninput: () => { s.originOther = other.value; saveChute(); } });
   const inv = h('input', { class: 'input', placeholder: 'Invoice # (optional)', value: s.invoice, oninput: () => { s.invoice = inv.value; saveChute(); } });
@@ -1665,7 +1669,7 @@ function bulkAdd(main, c, batch) {
 // ---------- mass treat calves already on the place ----------
 function renderMass(main) {
   const c = chuteState();
-  const m = c.mass || (c.mass = { drug: 'HR1 Draxxin', source: 'tags', tagText: '', pasture: '', skip: [], notes: '' });
+  const m = c.mass || (c.mass = { drug: 'Draxxin', source: 'tags', tagText: '', pasture: '', skip: [], notes: '' });
   const info = h('div', { id: 'massInfo' });
   let pick = () => [];
   const body = [];
@@ -2262,7 +2266,8 @@ export function boot(createStore) {
     onCrew: (crew) => { state.crew = crew; queue(); },
     onSettings: (s) => { state.settings = s || {}; queue(); },
     onEntries: (list) => {
-      state.allEntries = list;
+      // Old drug names (HR1 Draxxin, LR1 Bio-Mycin...) show under the new ones.
+      state.allEntries = list.map(normalizeEntry);
       applyMode();
       queue();
     },

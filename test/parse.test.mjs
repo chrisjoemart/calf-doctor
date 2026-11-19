@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { parseUtterance, isYes, isNo } from '../src/voice.js';
-import { analyze } from '../src/protocol.js';
+import { analyze, normalizeEntry, doseFrom } from '../src/protocol.js';
 import { computeReport, buildIndex } from '../src/reports.js';
 import { normalizeTemp, milesBetween, tagKey, tagLabel } from '../src/util.js';
 
@@ -20,22 +20,22 @@ const expect = (s, want) => check(s, () => assert.deepEqual(pick(P(s), Object.ke
 
 // --- basics (unchanged behaviour) ---
 expect('blue 42 103.3', { tagColor: 'blue', tagNum: '42', temp: 103.3, treatment: 'Check No Treatment', autoCNT: true });
-expect('blue 42 104.1 draxxin', { tagNum: '42', temp: 104.1, treatment: 'HR1 Draxxin' });
-expect('Blue 4951, Draxxin, 104.0', { tagNum: '4951', temp: 104, treatment: 'HR1 Draxxin' });
-expect('green 7 one oh four point two baytril pulled by jake', { tagColor: 'green', tagNum: '7', temp: 104.2, treatment: 'HR2 Baytril', pulledBy: 'jake@x' });
-expect('blue forty two 105 point 1 HR two respiratory', { tagNum: '42', temp: 105.1, treatment: 'HR2 Baytril', diagnosis: 'Respiratory' });
+expect('blue 42 104.1 draxxin', { tagNum: '42', temp: 104.1, treatment: 'Draxxin' });
+expect('Blue 4951, Draxxin, 104.0', { tagNum: '4951', temp: 104, treatment: 'Draxxin' });
+expect('green 7 one oh four point two baytril pulled by jake', { tagColor: 'green', tagNum: '7', temp: 104.2, treatment: 'Baytril', pulledBy: 'jake@x' });
+expect('blue forty two 105 point 1 HR two respiratory', { tagNum: '42', temp: 105.1, treatment: 'Baytril', diagnosis: 'Respiratory' });
 expect('blue forty two one oh four point two drax', { tagNum: '42', temp: 104.2 });
 expect('blue 42 103 3', { tagNum: '42', temp: 103.3 });
 expect('blue 42 dead wolf', { isDeath: true, cause: 'Wolf', diagnosis: 'Death', tagNum: '42' });
-expect('blue 42 sick 104.5 drax', { isDeath: false, temp: 104.5, treatment: 'HR1 Draxxin' });
-expect('Blue 103 104.2 nuflor', { tagNum: '103', temp: 104.2, treatment: 'HR3 NuFlor' });
+expect('blue 42 sick 104.5 drax', { isDeath: false, temp: 104.5, treatment: 'Draxxin' });
+expect('Blue 103 104.2 nuflor', { tagNum: '103', temp: 104.2, treatment: 'NuFlor' });
 expect('blew 15 104 drax wyatt', { tagNum: '15', temp: 104, pulledBy: 'wyatt@x' });
-expect('pink eye blue 33 102.5 LR1', { diagnosis: 'Pink Eye', treatment: 'LR1 Bio-Mycin', temp: 102.5 });
+expect('pink eye blue 33 102.5 LR1', { diagnosis: 'Pink Eye', treatment: 'Bio-Mycin', temp: 102.5 });
 expect('blue42 104.6 drax note limping on left front', { tagNum: '42', temp: 104.6, notes: 'limping on left front' });
 expect('blue 42 1038 drax', { temp: 103.8 });
 
 // --- order doesn't matter ---
-const same = { tagColor: 'blue', tagNum: '42', temp: 104.2, treatment: 'HR1 Draxxin' };
+const same = { tagColor: 'blue', tagNum: '42', temp: 104.2, treatment: 'Draxxin' };
 for (const s of [
   'blue 42 104.2 drax', 'drax blue 42 104.2', '104.2 drax blue 42', '42 blue drax 104.2',
   'drax 104.2 42 blue', 'temp 104.2 tag 42 blue drax', 'drax temp 4.2 blue tag 42', 'blue 42 drax 4.2',
@@ -64,11 +64,11 @@ check('typed temps', () => {
 });
 
 // --- drugs and diagnoses ---
-expect('blue 5 104.5 hr3 bio', { treatment: 'HR3 Bio-Mycin', tagNum: '5' });
-expect('blue 5 104.5 bio hr3', { treatment: 'HR3 Bio-Mycin', tagNum: '5' });
-expect('blue 5 104.5 hr three nuflor', { treatment: 'HR3 NuFlor', tagNum: '5' });
-expect('blue 5 104.5 hr3', { treatment: '', hr3Ambiguous: true, tagNum: '5' });
-expect('blue 5 102 biomycin', { treatment: 'LR1 Bio-Mycin' });
+expect('blue 5 104.5 hr3 bio', { treatment: 'Bio-Mycin', tagNum: '5' });
+expect('blue 5 104.5 bio hr3', { treatment: 'Bio-Mycin', tagNum: '5' });
+expect('blue 5 104.5 hr three nuflor', { treatment: 'NuFlor', tagNum: '5' });
+expect('blue 5 104.5 hr3', { treatment: 'NuFlor', tagNum: '5' });
+expect('blue 5 102 biomycin', { treatment: 'Bio-Mycin' });
 expect('blue 9 brainer thiamine 102.1', { diagnosis: 'Brainer', treatment: 'Thiamine', tagNum: '9' });
 expect('blue 9 brainer 102.1', { diagnosis: 'Brainer', treatment: '', autoCNT: false });
 expect('blue 12 bull castrated 102.8', { diagnosis: 'Bull Castrated', treatment: 'Castration – Bio-Mycin', tagNum: '12' });
@@ -84,7 +84,7 @@ expect('section twelve blue 42 104.2', { location: 'Section 12', tagNum: '42' })
 expect('blue 42 104.2 drax same pasture', { samePlace: true, location: '' });
 expect('no tag 104.2 drax', { noTag: true, tagNum: '', temp: 104.2 });
 expect('slick calf 4.5 drax', { noTag: true, tagNum: '', temp: 104.5 });
-expect('blue 42 no temp drax', { tagNum: '42', noTemp: true, temp: null, treatment: 'HR1 Draxxin' });
+expect('blue 42 no temp drax', { tagNum: '42', noTemp: true, temp: null, treatment: 'Draxxin' });
 expect("42 didn't temp bloat tube", { tagNum: '42', noTemp: true, temp: null, treatment: 'Tube' });
 expect('no tag no temp drax', { noTag: true, noTemp: true, tagNum: '', temp: null });
 expect('blue 42 no temperature respiratory', { tagNum: '42', noTemp: true, treatment: '' });
@@ -106,15 +106,30 @@ check('no temp: no temperature warnings, HR order still checked', () => {
 
 check('HR1 again suggests HR2', () => {
   const a = analyze([{ kind: 'pull', treatment: 'HR1 Draxxin', at: 1 }], { kind: 'pull', temp: 104.5, treatment: 'HR1 Draxxin', diagnosis: 'Respiratory' });
-  assert.deepEqual(a.suggestions, ['HR2 Baytril']);
+  assert.deepEqual(a.suggestions, ['Baytril']);
   assert.equal(a.warnings.length, 1);
 });
-check('after HR2 suggests both HR3 drugs', () => {
-  const a = analyze([{ kind: 'pull', treatment: 'HR1 Draxxin', at: 1 }, { kind: 'pull', treatment: 'HR2 Baytril', at: 2 }], { kind: 'pull', temp: 104.5, treatment: '', diagnosis: '' });
-  assert.deepEqual(a.suggestions, ['HR3 NuFlor', 'HR3 Bio-Mycin']);
+check('after Baytril suggests NuFlor', () => {
+  const a = analyze([{ kind: 'pull', treatment: 'HR1 Draxxin', at: 1 }, { kind: 'pull', treatment: 'Baytril', at: 2 }], { kind: 'pull', temp: 104.5, treatment: '', diagnosis: '' });
+  assert.deepEqual(a.suggestions, ['NuFlor']);
+});
+check('old names still count as their step', () => {
+  const a = analyze([normalizeEntry({ kind: 'pull', treatment: 'HR3 Bio-Mycin', at: 1 })], { kind: 'pull', temp: 104.5, treatment: 'Draxxin', diagnosis: '' });
+  assert.ok(a.warnings.some((w) => w.includes('already had Bio-Mycin')), a.warnings.join(' | '));
+});
+check('old names shown under new ones', () => {
+  assert.equal(normalizeEntry({ treatment: 'LR1 Bio-Mycin' }).treatment, 'Bio-Mycin');
+  assert.equal(normalizeEntry({ treatment: 'HR1 Draxxin' }).treatment, 'Draxxin');
+  assert.equal(normalizeEntry({ kind: 'batch', drug: 'HR1 Draxxin' }).drug, 'Draxxin');
+  assert.equal(normalizeEntry({ treatment: 'Tube' }).treatment, 'Tube');
+});
+check('old dose settings carry over', () => {
+  assert.equal(doseFrom({ 'HR1 Draxxin': '1.1 mL' }, 'Draxxin'), '1.1 mL');
+  assert.equal(doseFrom({ 'HR1 Draxxin': '1.1 mL', Draxxin: '' }, 'Draxxin'), '');
+  assert.equal(doseFrom({ 'LR1 Bio-Mycin': '5 mL', 'HR3 Bio-Mycin': '9 mL' }, 'Bio-Mycin'), '5 mL');
 });
 check('old combined HR3 still counts as HR3', () => {
-  const a = analyze([{ kind: 'pull', treatment: 'HR3 NuFlor / Bio-Mycin', at: 1 }], { kind: 'pull', temp: 104.5, treatment: 'HR3 NuFlor', diagnosis: '' });
+  const a = analyze([{ kind: 'pull', treatment: 'HR3 NuFlor / Bio-Mycin', at: 1 }], { kind: 'pull', temp: 104.5, treatment: 'NuFlor', diagnosis: '' });
   assert.match(a.warnings[0], /already had/);
 });
 check('brainer suggests thiamine', () => {

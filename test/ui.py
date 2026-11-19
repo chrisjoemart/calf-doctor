@@ -49,7 +49,7 @@ async def main():
         await pg.wait_for_timeout(200)
         prev = await pg.text_content('#tempPreview')
         assert prev.strip() == '= 103.8°F', prev
-        await pg.click('.chip:has-text("HR2 Baytril")')
+        await pg.click('.chip:has-text("Baytril")')
         await pg.wait_for_timeout(200)
         await pg.screenshot(path='test/05-notag-dose.png', full_page=True)
         await pg.click('button.save')
@@ -101,7 +101,7 @@ async def main():
         await pg.evaluate("localStorage.setItem('calfdoctor-demo-v2-user', JSON.stringify('jake@example.com'))")
         await pg.goto(URL)
         await pg.wait_for_timeout(500)
-        await pg.click('.chip:has-text("HR1 Draxxin")')
+        await pg.click('.chip:has-text("Draxxin")')
         await pg.wait_for_timeout(200)
         await pg.screenshot(path='test/11-cowboy.png', full_page=True)
         print('errors:', errs)

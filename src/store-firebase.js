@@ -164,7 +164,8 @@ export function createStore() {
       return fbSignOut(auth);
     },
     saveEntry(e) {
-      const { id, _pending, ...data } = e;
+      // Fields starting with _ are the app's own (sync state, old drug names): never saved.
+      const data = Object.fromEntries(Object.entries(e).filter(([k]) => k !== 'id' && !k.startsWith('_')));
       data.updatedAt = serverTimestamp();
       // Not awaited on purpose: offline writes queue on the phone and sync later.
       return setDoc(doc(db, 'entries', id), data);

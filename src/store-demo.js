@@ -68,7 +68,7 @@ function seed() {
         } else if (diagnosis === 'Bull Castrated') treatment = 'Castration – Bio-Mycin';
         else if (diagnosis === 'Brainer') treatment = 'Thiamine';
         else if (diagnosis === 'Bloat') treatment = 'Tube';
-        else treatment = 'LR1 Bio-Mycin';
+        else treatment = 'Bio-Mycin';
         e = { ...base, kind: 'pull', diagnosis, temp, treatment, cause: '' };
       }
       entries.push(e);
@@ -93,13 +93,13 @@ function seedLifecycle({ season, settings, entries, rnd, today }) {
   const arrival = new Map();
   for (const g of groups) {
     const at = today - g.processed * D + 8 * 3600000;
-    const b = base('batch', at, { batchType: 'processing', purchaseDate: iso(today - g.bought * D), origin: g.origin, originOther: '', invoice: g.invoice, pasture: g.pasture, drug: 'HR1 Draxxin', dose: '', treatAll: g.all });
+    const b = base('batch', at, { batchType: 'processing', purchaseDate: iso(today - g.bought * D), origin: g.origin, originOther: '', invoice: g.invoice, pasture: g.pasture, drug: 'Draxxin', dose: '', treatAll: g.all });
     entries.push(b);
     for (let n = g.from; n <= g.to; n++) {
       const weight = Math.round(420 + rnd() * 140);
       const temp = !g.all && n - g.from < 20 ? Math.round((102.4 + rnd() * 3) * 10) / 10 : null;
       const treated = g.all || (temp !== null && temp > 104) ;
-      entries.push(calf('process', n, at + (n - g.from) * 25000, { batchId: b.id, weight, temp, treatment: treated ? 'HR1 Draxxin' : '', dose: '' }));
+      entries.push(calf('process', n, at + (n - g.from) * 25000, { batchId: b.id, weight, temp, treatment: treated ? 'Draxxin' : '', dose: '' }));
       arrival.set(n, { weight, g });
     }
   }
@@ -166,7 +166,7 @@ export function createStore() {
       h.onAuth({ user: null, access: 'signedOut' });
     },
     async saveEntry(e) {
-      const { _pending, ...rest } = e;
+      const rest = Object.fromEntries(Object.entries(e).filter(([k]) => !k.startsWith('_')));
       const i = data.entries.findIndex((x) => x.id === e.id);
       if (i >= 0) data.entries[i] = rest;
       else data.entries.push(rest);

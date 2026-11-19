@@ -67,7 +67,7 @@ async def main():
         await pg.fill('#tagNum', '1015')
         await pg.wait_for_timeout(200)
         panel = await pg.text_content('#tagPanel')
-        assert ': HR1 Draxxin' in panel and 'first treatment' in panel, panel
+        assert ': Draxxin' in panel and 'first treatment' in panel, panel
         await shot('l06-doctor-mass-note', False)
         await pg.click('.brand')
 

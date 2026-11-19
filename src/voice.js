@@ -190,10 +190,7 @@ export function parseUtterance(raw, ctx = {}) {
   // A bare "HR3" (drug said separately, or not at all).
   const bare = hasWord(s, HR3_BARE);
   s = bare.text;
-  if (bare.hit) {
-    if (result.treatment === 'LR1 Bio-Mycin') result.treatment = 'HR3 Bio-Mycin';
-    else if (!result.treatment) result.hr3Ambiguous = true;
-  }
+  if (bare.hit && !result.treatment) result.treatment = 'NuFlor';
   // Leftover "hr 2" / "lr 1" pieces must not be read as tag numbers.
   s = s.replace(/(^|\s)[hl] ?r ?\d(?=\s|$)/g, ' ');
   // Castrating is both the diagnosis and the treatment.

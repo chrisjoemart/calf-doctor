@@ -6,14 +6,21 @@ export const DIAGNOSES = [
   'Water Belly', 'Bloat', 'Injury', 'Death', 'Other',
 ];
 
-// Respiratory protocol steps. HR3 can be either drug.
-export const HR_STEPS = [['HR1 Draxxin'], ['HR2 Baytril'], ['HR3 NuFlor', 'HR3 Bio-Mycin']];
+// Respiratory protocol: Draxxin, then Baytril, then NuFlor.
+// Christian dropped the HR1/HR2/HR3/LR1 prefixes on Nov 18, 2026, and the separate
+// "HR3 Bio-Mycin" (Bio-Mycin is just Bio-Mycin now).
+export const HR_STEPS = [['Draxxin'], ['Baytril'], ['NuFlor']];
 export const HR = HR_STEPS.flat();
-// Entries saved before NuFlor and Bio-Mycin were split still count as HR3.
-export const LEGACY_TREATMENTS = { 'HR3 NuFlor / Bio-Mycin': 2 };
+// Names saved before then are shown under the new names everywhere...
+export const RENAMED = {
+  'HR1 Draxxin': 'Draxxin', 'HR2 Baytril': 'Baytril', 'HR3 NuFlor': 'NuFlor',
+  'HR3 Bio-Mycin': 'Bio-Mycin', 'LR1 Bio-Mycin': 'Bio-Mycin', 'HR3 NuFlor / Bio-Mycin': 'NuFlor / Bio-Mycin',
+};
+// ...and the old respiratory ones still count as the step they were.
+export const LEGACY_HR = { 'HR1 Draxxin': 0, 'HR2 Baytril': 1, 'HR3 NuFlor': 2, 'HR3 Bio-Mycin': 2, 'HR3 NuFlor / Bio-Mycin': 2 };
 export const CNT = 'Check No Treatment';
 export const TREATMENTS = [
-  ...HR, 'LR1 Bio-Mycin', 'Castration – Bio-Mycin', 'Thiamine', 'Tube', CNT, 'Other',
+  ...HR, 'Bio-Mycin', 'Castration – Bio-Mycin', 'Thiamine', 'Tube', CNT, 'Other',
 ];
 // Treatments that can carry an admin-set dose.
 export const DOSED_TREATMENTS = TREATMENTS.filter((t) => t !== CNT && t !== 'Other');
@@ -35,17 +42,17 @@ export const COLOR_HEX = {
 
 // What the crew might say out loud. Admins can add more in Settings without a code change.
 export const TREATMENT_ALIASES = {
-  'HR1 Draxxin': ['hr1', 'hr 1', 'h r 1', 'hr1 draxxin', 'draxxin', 'draxin', 'drax in', 'drax', 'drachs'],
-  'HR2 Baytril': ['hr2', 'hr 2', 'h r 2', 'hr2 baytril', 'baytril', 'bay trill', 'bay tril', 'baytrill', 'bay trail'],
-  'HR3 NuFlor': ['hr3 nuflor', 'hr 3 nuflor', 'hr3 new flor', 'hr 3 new floor', 'nuflor', 'nu flor', 'new flor', 'newflor', 'new floor', 'nuflo', 'new flow'],
-  'HR3 Bio-Mycin': ['hr3 bio mycin', 'hr 3 bio mycin', 'hr3 biomycin', 'hr 3 biomycin', 'hr3 bio', 'hr 3 bio', 'h r 3 bio'],
-  'LR1 Bio-Mycin': ['lr1', 'lr 1', 'l r 1', 'lr1 bio mycin', 'lr 1 bio mycin', 'bio mycin', 'biomycin', 'bio mice in', 'bio'],
+  'Draxxin': ['hr1', 'hr 1', 'h r 1', 'hr1 draxxin', 'draxxin', 'draxin', 'drax in', 'drax', 'drachs'],
+  'Baytril': ['hr2', 'hr 2', 'h r 2', 'hr2 baytril', 'baytril', 'bay trill', 'bay tril', 'baytrill', 'bay trail'],
+  'NuFlor': ['hr3 nuflor', 'hr 3 nuflor', 'hr3 new flor', 'hr 3 new floor', 'nuflor', 'nu flor', 'new flor', 'newflor', 'new floor', 'nuflo', 'new flow'],
+  'Bio-Mycin': ['lr1', 'lr 1', 'l r 1', 'lr1 bio mycin', 'lr 1 bio mycin', 'bio mycin', 'biomycin', 'bio mice in', 'bio',
+    'hr3 bio mycin', 'hr 3 bio mycin', 'hr3 biomycin', 'hr 3 biomycin', 'hr3 bio', 'hr 3 bio', 'h r 3 bio'],
   'Castration – Bio-Mycin': ['castration', 'castrated', 'castrate', 'cut him', 'cut'],
   'Thiamine': ['thiamine', 'thiamin', 'thymine', 'thighmine', 'vitamin b1', 'vitamin b 1', 'b1', 'b 1'],
   'Tube': ['tubed', 'tubing', 'tube'],
   [CNT]: ['check no treatment', 'check no treat', 'no treatment', 'check only', 'just a check', 'cnt', 'no treat', 'nothing'],
 };
-// Said "HR3" without naming the drug.
+// Said "HR3" without naming the drug: that's NuFlor now.
 export const HR3_BARE = ['hr3', 'hr 3', 'h r 3'];
 
 export const DIAGNOSIS_ALIASES = {

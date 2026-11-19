@@ -24,11 +24,11 @@ const S = 2026;
 const day = (n) => Date.UTC(2026, 10, 1) + n * 86400000;
 const calf = (kind, num, at, extra = {}) => ({ id: `${kind}-${num}-${at}`, season: S, kind, tagNum: String(num), tagKey: tagKey(S, num), at, ...extra });
 const entries = [
-  { id: 'b1', season: S, kind: 'batch', batchType: 'processing', purchaseDate: '2026-10-30', origin: 'Riverton', invoice: 'INV-9', pasture: 'Feedlot 1', drug: 'HR1 Draxxin', at: day(2) },
-  calf('process', 101, day(2), { batchId: 'b1', weight: 450, treatment: 'HR1 Draxxin' }),
+  { id: 'b1', season: S, kind: 'batch', batchType: 'processing', purchaseDate: '2026-10-30', origin: 'Riverton', invoice: 'INV-9', pasture: 'Feedlot 1', drug: 'Draxxin', at: day(2) },
+  calf('process', 101, day(2), { batchId: 'b1', weight: 450, treatment: 'Draxxin' }),
   calf('process', 102, day(2), { batchId: 'b1', weight: 500, treatment: '', temp: 102.8 }),
-  calf('process', 103, day(2), { batchId: 'b1', weight: 480, treatment: 'HR1 Draxxin' }),
-  calf('pull', 101, day(5), { pulledBy: 'jake@x', treatment: 'HR1 Draxxin', location: 'Feedlot 1' }),
+  calf('process', 103, day(2), { batchId: 'b1', weight: 480, treatment: 'Draxxin' }),
+  calf('pull', 101, day(5), { pulledBy: 'jake@x', treatment: 'Draxxin', location: 'Feedlot 1' }),
   calf('implant', 101, day(62), { which: 'Reimplant', product: 'Rev G', weight: 600 }),
   calf('implant', 102, day(62), { which: 'Reimplant', product: 'Synovex', weight: 590 }),
   calf('weigh', 101, day(92), { weight: 660, stage: 'Other' }),
@@ -39,7 +39,7 @@ const sums = summarizeAll(entries);
 const c101 = sums.get(tagKey(S, 101));
 const c102 = sums.get(tagKey(S, 102));
 check('origin and purchase from batch', () => { assert.equal(c101.arrival.origin, 'Riverton'); assert.equal(new Date(c101.purchasedAt).getDate(), 30); });
-check('mass treatment remembered', () => assert.equal(c101.massTreatments[0].treatment, 'HR1 Draxxin'));
+check('mass treatment remembered', () => assert.equal(c101.massTreatments[0].treatment, 'Draxxin'));
 check('ADG since arrival', () => assert.equal(Math.round(c101.gain.sinceArrival * 100) / 100, Math.round((210 / 90) * 100) / 100));
 check('ADG since last weight', () => assert.equal(c101.gain.sinceLast, 2));
 check('weights in order', () => assert.deepEqual(c101.weights.map((w) => w.weight), [450, 600, 660]));
