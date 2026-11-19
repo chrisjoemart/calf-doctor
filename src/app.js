@@ -2089,9 +2089,8 @@ function renderCounts(main) {
         h('div', { class: 'row' }, h('span', { class: 'count-n' }, c.count === null || c.count === undefined ? '—' : c.count),
           h('button', { class: 'btn small', onclick: () => setCount(p, c.count) }, 'Set')));
     })),
-    h('p', { class: 'muted small' }, 'Counts change on their own when calves are processed into a pasture, moved, or found dead there.',
-      admin ? '' : ' Only admins can move cattle.')));
-  if (admin) renderTransfer(main, cnt);
+    h('p', { class: 'muted small' }, 'Counts change on their own when calves are processed into a pasture, moved, or found dead there.')));
+  renderTransfer(main, cnt);
   const hist = state.all.filter((e) => e.kind === 'move' || e.kind === 'count').sort((a, b) => b.at - a.at);
   main.append(h('section', { class: 'card' },
     h('label', { class: 'lbl' }, 'Recent changes'),
@@ -2127,7 +2126,7 @@ function renderTransfer(main, cnt) {
   tagsIn.addEventListener('input', () => { x.tagText = tagsIn.value; });
   const fromC = x.from ? (cnt.get(x.from) || {}).count : null;
   main.append(h('section', { class: 'card' },
-    h('label', { class: 'lbl' }, 'Move cattle (admin)'),
+    h('label', { class: 'lbl' }, 'Move cattle'),
     h('label', { class: 'lbl' }, 'From'), pastureSelect(x.from, (v) => { x.from = v; render(); }),
     x.from ? h('p', { class: 'muted small' }, fromC === null || fromC === undefined ? `${x.from} hasn't been counted.` : `${fromC} head in ${x.from} now.`) : null,
     h('label', { class: 'lbl' }, 'To'), pastureSelect(x.to, (v) => { x.to = v; }, 'Pick a pasture…', [OUT_PASTURE]),
