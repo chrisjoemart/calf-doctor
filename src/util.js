@@ -51,9 +51,13 @@ export function pct(n, d) {
   return Math.round((100 * n) / d) + '%';
 }
 
+// The demo can be served from the same site as the real app, so it keeps its saved settings
+// under its own prefix (set by demo-flag.js, which loads first) and can't touch the real app's.
+const lsKey = (key) => (globalThis.__CD_LS_PREFIX || '') + key;
+
 export function lsGet(key, fallback = null) {
   try {
-    const v = localStorage.getItem(key);
+    const v = localStorage.getItem(lsKey(key));
     return v === null ? fallback : JSON.parse(v);
   } catch {
     return fallback;
@@ -61,7 +65,7 @@ export function lsGet(key, fallback = null) {
 }
 export function lsSet(key, value) {
   try {
-    localStorage.setItem(key, JSON.stringify(value));
+    localStorage.setItem(lsKey(key), JSON.stringify(value));
   } catch {
     /* storage unavailable: keep going */
   }
