@@ -2087,10 +2087,10 @@ function renderCounts(main) {
       return h('div', { class: 'count-row' },
         h('div', null, h('strong', null, p), h('div', { class: 'muted small' }, c.updatedAt ? `updated ${fmtWhen(c.updatedAt)}` : 'not counted yet')),
         h('div', { class: 'row' }, h('span', { class: 'count-n' }, c.count === null || c.count === undefined ? '—' : c.count),
-          admin ? h('button', { class: 'btn small', onclick: () => setCount(p, c.count) }, 'Set') : null));
+          h('button', { class: 'btn small', onclick: () => setCount(p, c.count) }, 'Set')));
     })),
     h('p', { class: 'muted small' }, 'Counts change on their own when calves are processed into a pasture, moved, or found dead there.',
-      admin ? '' : ' Only admins can set counts or move cattle.')));
+      admin ? '' : ' Only admins can move cattle.')));
   if (admin) renderTransfer(main, cnt);
   const hist = state.all.filter((e) => e.kind === 'move' || e.kind === 'count').sort((a, b) => b.at - a.at);
   main.append(h('section', { class: 'card' },

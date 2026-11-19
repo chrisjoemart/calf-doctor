@@ -49,7 +49,7 @@ npm run build
   - `batch`: a processing group (`batchType: 'processing'`, purchase date, origin, invoice #, pasture they go to, mass-treatment drug) or a mass treatment of calves already here (`batchType: 'mass'`). Admins can fill in the purchase date and invoice # later.
   - `process`: one calf in a batch: tag, weight, temp, treatment given. Never counted as doctoring or credited to a cowboy; a later pull still counts as the first treatment.
   - `implant` (implant/reimplant, product, weight), `weigh` (weight, stage, `source: 'chute' | 'import' | 'manual'`), `sale` (final weight, collar removed).
-  - `count` (admin sets a pasture's head count), `move` (head moved from one pasture to another, by number or by tags; `to: 'Sold / shipped'` takes them off the place), `feed` (pasture, lbs, the driver's head count and the app's count at the time).
+  - `count` (anyone on the crew sets a pasture's head count), `move` (head moved from one pasture to another, by number or by tags; `to: 'Sold / shipped'` takes them off the place), `feed` (pasture, lbs, the driver's head count and the app's count at the time).
   - Pasture head counts are worked out from these: counts set, moves, calves processed into a pasture, deaths found there.
 - Storage `entries/{id}/…`: photos (shrunk to 1600 px on the phone) and videos for death reports.
 
