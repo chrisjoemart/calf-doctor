@@ -168,7 +168,7 @@ export function createStore() {
       const data = Object.fromEntries(Object.entries(e).filter(([k]) => k !== 'id' && !k.startsWith('_')));
       data.updatedAt = serverTimestamp();
       // Not awaited on purpose: offline writes queue on the phone and sync later.
-      return setDoc(doc(db, 'entries', id), data);
+      return setDoc(doc(db, 'entries', e.id), data);
     },
     deleteEntry(id) {
       return deleteDoc(doc(db, 'entries', id));

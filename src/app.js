@@ -1241,8 +1241,9 @@ function calfEntry(kind, tag, extra) {
   return newEntry(kind, { noTag: false, tagNum: n, tagColor: seasonColor(), tagKey: tagKey(season(), n), ...extra });
 }
 // Not awaited by callers: offline writes queue on the phone and sync later.
+// The async wrapper turns an error thrown right away into a toast, so a Save button never just sits there.
 function put(entry) {
-  return Promise.resolve(store.saveEntry(entry)).catch((err) => toast('Couldn\'t save: ' + (err.code || err.message)));
+  return (async () => store.saveEntry(entry))().catch((err) => toast('Couldn\'t save: ' + (err.code || err.message)));
 }
 function drop(e) {
   return Promise.resolve(store.deleteEntry(e.id)).catch((err) => toast('Couldn\'t delete: ' + (err.code || err.message)));
