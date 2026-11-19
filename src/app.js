@@ -1,5 +1,6 @@
 import {
   DIAGNOSES, TREATMENTS, DOSED_TREATMENTS, CAUSES, CNT, TEMP_THRESHOLD, MOVED_WARN_MILES, COLOR_HEX,
+  ORIGINS, IMPLANT_PRODUCTS, MASS_TEMP, MASS_SWITCH_SHARE, OUT_PASTURE, WEIGH_STAGES,
 } from './constants.js';
 import {
   h, uid, cap, fmtWhen, fmtDay, startOfDay, dayKey, pct, lsGet, lsSet, tagKey, tagLabel, normalizeTemp,
@@ -9,8 +10,12 @@ import { parseUtterance, listen, speechSupported, isYes, isNo } from './voice.js
 import { analyze } from './protocol.js';
 import { buildIndex, computeReport, rangeFor, toCSV } from './reports.js';
 import { prepareFiles, createUploader } from './media.js';
+import {
+  DOCTOR_KINDS, parseTagList, summarizeAll, pastureCounts, headMismatch, lbsPerHead, calvesInPasture,
+  gainReport, feedReport, calfCSV, feedCSV, ledgerCSV, parseCSV, guessColumns, readWeights,
+} from './herd.js';
 
-const VERSION = '0.4.0';
+const VERSION = '0.6.0';
 
 let store;
 const state = {
@@ -40,13 +45,21 @@ const state = {
   mediaWaiting: 0,
   practice: lsGet('cd-practice', false),
   allEntries: [],
+  all: [], // every entry in the current mode (real or practice), all kinds
+  calves: new Map(), // tagKey -> calf summary (herd.js)
+  chute: lsGet('cd-chute', null),
+  pastureView: 'feed',
 };
 
 // Practice mode: entries are saved with practice: true and live in their own world.
 // Real reports, lookup and protocol history never see them, and vice versa.
+// state.entries keeps only doctoring (pulls and deaths) so the doctoring screens and reports
+// work exactly as before; state.all has everything, for the lifecycle screens.
 function applyMode() {
-  state.entries = state.allEntries.filter((e) => !!e.practice === !!state.practice);
+  state.all = state.allEntries.filter((e) => !!e.practice === !!state.practice);
+  state.entries = state.all.filter((e) => DOCTOR_KINDS.includes(e.kind || 'pull'));
   state.byTag = buildIndex(state.entries);
+  state.calves = summarizeAll(state.all);
 }
 function setPractice(on) {
   state.practice = !!on;
@@ -66,6 +79,8 @@ function practiceBar() {
     h('button', { class: 'link', onclick: () => setPractice(false) }, 'Turn off'));
 }
 let stopListening = null;
+// Things to run once the screen is drawn (focusing the next box at the chute).
+const afterRender = [];
 let installPrompt = null;
 let uploader = null;
 
@@ -234,7 +249,7 @@ function render() {
 
   const main = h('main', { id: 'main' });
   const nav = h('nav', { class: 'tabs' },
-    [['doctor', '💉', 'Doctor'], ['lookup', '🔎', 'Tag lookup'], ['reports', '📊', 'Reports'], ['more', '☰', 'More']].map(([v, icon, label]) =>
+    [['doctor', '💉', 'Doctor'], ['chute', '🐂', 'Chute'], ['pastures', '🌾', 'Pastures'], ['lookup', '🔎', 'Lookup'], ['reports', '📊', 'Reports'], ['more', '☰', 'More']].map(([v, icon, label]) =>
       h('button', { class: 'tab' + (state.view === v ? ' on' : ''), onclick: () => { state.view = v; stopVoice(); render(); window.scrollTo(0, 0); } },
         h('span', { class: 'tab-icon' }, icon), h('span', null, label))));
   const header = h('header', { class: 'top' },
@@ -242,7 +257,8 @@ function render() {
     syncBadge());
   root.replaceChildren(...[header, store.mode === 'demo' ? h('div', { class: 'demo-bar' }, `Demo: data stays on this device. Signed in as ${nameOf(myEmail())}.`) : null, practiceBar(), main, nav].filter(Boolean));
   if (state.error) main.append(h('div', { class: 'warn' }, state.error));
-  ({ doctor: renderDoctor, lookup: renderLookup, reports: renderReports, more: renderMore })[state.view](main);
+  ({ doctor: renderDoctor, chute: renderChute, pastures: renderPastures, lookup: renderLookup, reports: renderReports, more: renderMore })[state.view](main);
+  afterRender.splice(0).forEach((fn) => fn());
 }
 
 const AUTH_ERRORS = {
@@ -663,7 +679,16 @@ function updateTagPanel() {
         h('div', { class: 'hist-line' + (e.kind === 'death' ? ' dead' : '') },
           `${fmtDay(e.at)} · ${e.kind === 'death' ? 'DEAD (' + e.cause + ')' : (e.treatment || '—') + (e.temp ? ' · ' + e.temp + '°' : '')} · ${nameOf(e.pulledBy)}`))));
   } else {
-    kids.push(h('div', { class: 'muted small new-calf' }, 'First entry for this tag this season.'));
+    kids.push(h('div', { class: 'muted small new-calf' }, 'First doctoring entry for this tag this season.'));
+  }
+  // What happened at processing travels with the calf. A pull after a mass treatment
+  // still counts as the first treatment.
+  const calf = !f.noTag && state.calves.get(key);
+  if (calf && (calf.processedAt || calf.massTreatments.length)) {
+    const m = calf.massTreatments[0];
+    kids.push(h('div', { class: 'proc-note' },
+      calf.processedAt ? `Processed ${fmtDay(calf.processedAt)}${calf.arrivalWeight ? ' · ' + calf.arrivalWeight + ' lb' : ''}` : '',
+      m ? h('div', null, h('strong', null, `${massLabel(m)}: ${m.treatment}`), ` on ${fmtDay(m.at)}. This pull counts as the first treatment.`) : null));
   }
   if (a.suggestions.length && !a.suggestions.includes(f.treatment) && formKind(f) === 'pull') {
     for (const sug of a.suggestions) {
@@ -906,46 +931,6 @@ function stopVoice() {
   state.listening = false;
 }
 
-// ---------- lookup ----------
-function renderLookup(main) {
-  const L = state.lookup;
-  const results = h('div', { id: 'lookupResults' });
-  const num = h('input', { class: 'input tagnum', inputmode: 'numeric', pattern: '[0-9]*', placeholder: 'Tag #', value: L.num,
-    oninput: () => { num.value = num.value.replace(/\D/g, ''); L.num = num.value; drawLookup(results); } });
-  main.append(h('section', { class: 'card' },
-    h('label', { class: 'lbl' }, 'Look up a tag',
-      seasonColor() ? h('span', { class: 'season-color' }, colorSwatch(seasonColor()), `${cap(seasonColor())} · ${season()}`) : null),
-    num), results);
-  drawLookup(results);
-
-  // Watch list: calves pulled more than once
-  const multi = [...state.byTag.values()].filter((l) => l.filter((e) => e.kind === 'pull').length >= 2 && !l.some((e) => e.kind === 'death'))
-    .sort((a, b) => b[b.length - 1].at - a[a.length - 1].at).slice(0, 30);
-  main.append(h('section', { class: 'card' },
-    h('label', { class: 'lbl' }, `Pulled 2+ times (${multi.length})`),
-    multi.length ? h('div', { class: 'list' }, multi.map((l) => {
-      const last = l[l.length - 1];
-      return h('button', { class: 'entry', onclick: () => { L.num = last.tagNum; render(); window.scrollTo(0, 0); } },
-        h('div', { class: 'entry-top' }, h('strong', null, tagLabel(last, season())), h('span', { class: 'muted small' }, `${l.filter((e) => e.kind === 'pull').length} pulls`)),
-        h('div', { class: 'muted small' }, `Last: ${fmtWhen(last.at)} · ${last.treatment || last.cause || ''}`));
-    })) : h('p', { class: 'muted' }, 'None yet.')));
-}
-
-function drawLookup(el) {
-  const L = state.lookup;
-  if (!L.num) return el.replaceChildren();
-  const key = tagKey(season(), L.num);
-  const list = (state.byTag.get(key) || []).slice().sort((a, b) => b.at - a.at);
-  if (!list.length) return el.replaceChildren(h('section', { class: 'card' }, h('p', null, `No entries for ${seasonColor() ? cap(seasonColor()) : 'tag'} ${L.num} this season.`)));
-  const pulls = list.filter((e) => e.kind === 'pull');
-  const dead = list.find((e) => e.kind === 'death');
-  el.replaceChildren(h('section', { class: 'card' },
-    h('div', { class: 'tag-summary' },
-      h('div', { class: 'big-tag' }, tagLabel(list[0], season())),
-      h('div', null, dead ? h('span', { class: 'pill dead' }, `Dead · ${dead.cause}`) : h('span', { class: 'pill' }, `${pulls.length} ${pulls.length === 1 ? 'pull' : 'pulls'}`))),
-    h('div', { class: 'list' }, list.map(entryRow))));
-}
-
 // ---------- reports ----------
 function renderReports(main) {
   const r = state.reportRange;
@@ -1016,7 +1001,9 @@ function renderReports(main) {
       h('p', { class: 'muted small' }, 'Each drug counts as one drug no matter its dose. When the dose changes, this shows how the old and new doses compare.')));
   }
 
-  main.append(h('button', { class: 'btn', onclick: exportCSV }, 'Download season as CSV (opens in Sheets/Excel)'));
+  renderGainReports(main);
+
+  main.append(h('button', { class: 'btn', onclick: exportCSV }, 'Download doctoring as CSV (opens in Sheets/Excel)'));
   main.append(h('p', { class: 'muted small' }, 'Draft definitions, to confirm with Christian. Repulls count against whoever did the earlier pull, with no time limit within the season.'));
 }
 
@@ -1082,9 +1069,11 @@ function renderMore(main) {
 
   main.append(h('section', { class: 'card' },
     h('label', { class: 'lbl' }, 'Data'),
-    h('button', { class: 'btn', onclick: exportCSV }, 'Download season as CSV'),
+    h('button', { class: 'btn', onclick: exportCSV }, 'Download doctoring (CSV)'),
+    h('button', { class: 'btn', onclick: () => download(calfCSV(state.calves, nameOf), 'calves') }, 'Download one row per calf (CSV)'),
+    h('button', { class: 'btn', onclick: () => download(feedCSV(state.all, nameOf), 'feed') }, 'Download feed log (CSV)'),
     store.mode === 'demo' ? h('button', { class: 'btn ghost', onclick: () => store.resetDemo() }, 'Reset demo data') : null,
-    h('p', { class: 'muted small' }, `Season ${season()} · ${state.entries.length} ${state.practice ? 'practice ' : ''}entries · app v${VERSION}`)));
+    h('p', { class: 'muted small' }, `Season ${season()} · ${state.entries.length} ${state.practice ? 'practice ' : ''}doctoring entries · ${state.calves.size} calves on record · app v${VERSION}`)));
 }
 
 function renderPracticeAdmin() {
@@ -1175,6 +1164,10 @@ function renderSettings() {
   const herdsIn = h('textarea', { class: 'input', rows: 4, placeholder: 'One per line, e.g.\nPairs\nHeifers' });
   herdsIn.value = (s.herds || []).join('\n');
   const doseIns = DOSED_TREATMENTS.map((t) => [t, h('input', { class: 'input dose-in', placeholder: 'e.g. 1.1 mL per 100 lb, under the skin', value: (s.dosages || {})[t] || '' })]);
+  const originsIn = h('textarea', { class: 'input', rows: 6, placeholder: 'One per line' });
+  originsIn.value = origins().join('\n');
+  const implantsIn = h('textarea', { class: 'input', rows: 3, placeholder: 'One per line' });
+  implantsIn.value = implantProducts().join('\n');
   const aliases = h('textarea', { class: 'input', rows: 4, placeholder: 'drax = HR1 Draxxin\nthe blue stuff = LR1 Bio-Mycin' });
   aliases.value = Object.entries(s.extraAliases || {}).map(([k, v]) => `${k} = ${v}`).join('\n');
   return h('section', { class: 'card' },
@@ -1185,6 +1178,9 @@ function renderSettings() {
     h('label', { class: 'lbl' }, 'Pastures'), locs,
     h('p', { class: 'muted small' }, 'Cowboys pick these, or say the name into the mic.'),
     h('label', { class: 'lbl' }, 'Herds (for death reports)'), herdsIn,
+    h('label', { class: 'lbl' }, 'Where calves are bought from'), originsIn,
+    h('p', { class: 'muted small' }, 'Shown at processing. Keep "Other" on the list so the crew can type a new place.'),
+    h('label', { class: 'lbl' }, 'Implant products'), implantsIn,
     h('label', { class: 'lbl' }, 'Doses'),
     h('p', { class: 'muted small' }, 'Cowboys see the dose when they pick a drug, and in the dosage chart. They can\'t change it.'),
     h('div', { class: 'dose-grid' }, doseIns.map(([t, inp]) => h('label', { class: 'dose-row' }, h('span', null, t), inp))),
@@ -1205,12 +1201,996 @@ function renderSettings() {
         seasonColor: colorSel.value,
         locations: locs.value.split('\n').map((l) => l.trim()).filter(Boolean),
         herds: herdsIn.value.split('\n').map((l) => l.trim()).filter(Boolean),
+        origins: originsIn.value.split('\n').map((l) => l.trim()).filter(Boolean),
+        implants: implantsIn.value.split('\n').map((l) => l.trim()).filter(Boolean),
         dosages: Object.fromEntries(doseIns.map(([t, inp]) => [t, inp.value.trim()]).filter(([, v]) => v)),
         tagColors: s.tagColors || [],
         extraAliases,
       });
       toast(bad.length ? `Saved. Couldn't match: ${bad.join('; ')}` : 'Settings saved');
     } }, 'Save settings'));
+}
+
+// =====================================================================
+// ---------- calf lifecycle: chute, pastures, calf history ----------
+// =====================================================================
+const origins = () => (Array.isArray(state.settings.origins) && state.settings.origins.length ? state.settings.origins : ORIGINS);
+const implantProducts = () => (Array.isArray(state.settings.implants) && state.settings.implants.length ? state.settings.implants : IMPLANT_PRODUCTS);
+const counts = () => pastureCounts(state.all, pastures());
+const fmtLb = (n) => (n === null || n === undefined || !Number.isFinite(n) ? '—' : Math.round(n).toLocaleString() + ' lb');
+const fmtAdg = (x) => (x === null || x === undefined ? '—' : `${x.toFixed(2)} lb/day`);
+const dateLabel = (iso) => (iso ? fmtDay(new Date(iso + 'T12:00').getTime()) : '');
+const originLabel = (b) => (!b ? '' : b.origin === 'Other' ? b.originOther || 'Other' : b.origin || '');
+const calfOf = (tag) => state.calves.get(tagKey(season(), tag));
+// A treatment from the chute: given to the whole group (mass), or at processing.
+const massLabel = (p) => {
+  const b = state.all.find((x) => x.id === p.batchId);
+  return b && (b.batchType === 'mass' || b.treatAll) ? 'Mass treated' : 'Treated at processing';
+};
+const cleanEntry = (e) => Object.fromEntries(Object.entries(e).filter(([k]) => !k.startsWith('_')));
+const seasonTag = (n) => (seasonColor() ? `${cap(seasonColor())} ${n}` : `Tag ${n}`);
+const saveChute = () => lsSet('cd-chute', state.chute);
+const focusLater = (id) => afterRender.push(() => { const el = document.getElementById(id); if (el) el.focus(); });
+
+function newEntry(kind, extra) {
+  return { id: uid(), season: season(), kind, at: Date.now(), enteredBy: myEmail(), practice: !!state.practice, notes: '', ...extra };
+}
+function calfEntry(kind, tag, extra) {
+  const n = cleanTagNum(tag);
+  return newEntry(kind, { noTag: false, tagNum: n, tagColor: seasonColor(), tagKey: tagKey(season(), n), ...extra });
+}
+// Not awaited by callers: offline writes queue on the phone and sync later.
+function put(entry) {
+  return Promise.resolve(store.saveEntry(entry)).catch((err) => toast('Couldn\'t save: ' + (err.code || err.message)));
+}
+function drop(e) {
+  return Promise.resolve(store.deleteEntry(e.id)).catch((err) => toast('Couldn\'t delete: ' + (err.code || err.message)));
+}
+function readWeight(v) {
+  const s = String(v ?? '').replace(/[^\d.]/g, '');
+  if (!s) return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? Math.round(n * 10) / 10 : NaN;
+}
+const weightOk = (w) => w === null || (Number.isFinite(w) && w >= 50 && w <= 3000);
+function readTemp(v) {
+  if (v === '' || v === null || v === undefined) return null;
+  const t = normalizeTemp(v);
+  return Number.isFinite(t) && t >= 95 && t <= 110 ? t : NaN;
+}
+
+function pastureSelect(value, onchange, blankLabel = 'Pick a pasture…', extra = []) {
+  const opts = [...pastures(), ...extra];
+  if (value && !opts.includes(value)) opts.push(value);
+  const sel = h('select', { class: 'input', onchange: () => onchange(sel.value) },
+    h('option', { value: '' }, blankLabel),
+    opts.map((p) => h('option', { value: p, selected: p === value }, p)));
+  return sel;
+}
+
+function drugChips(value, onpick) {
+  return h('div', null,
+    h('div', { class: 'chips' }, TREATMENTS.filter((t) => t !== CNT).map((t) =>
+      h('button', { class: 'chip' + (value === t ? ' on' : ''), onclick: () => onpick(value === t ? '' : t) }, t))),
+    doseBox(value));
+}
+
+function seg(options, value, onpick) {
+  return h('div', { class: 'seg' }, options.map(([k, l]) =>
+    h('button', { class: 'seg-btn' + (value === k ? ' on' : ''), onclick: () => onpick(k) }, l)));
+}
+
+// ---------- chute ----------
+const JOBS = [
+  ['process', 'Processing', 'New calves: tag, weigh, treat'],
+  ['mass', 'Mass treat', 'Calves already here'],
+  ['implant', 'Implant', 'Implant or reimplant'],
+  ['weigh', 'Weigh', 'Weights only'],
+  ['sale', 'Sale', 'Final weight, collar off'],
+  ['import', 'Scale file', 'Import Tru-Test weights'],
+];
+const JOB_NAME = Object.fromEntries(JOBS.map(([k, l]) => [k, l]));
+
+function chuteState() {
+  if (!state.chute) state.chute = { job: 'process' };
+  return state.chute;
+}
+
+function renderChute(main) {
+  const c = chuteState();
+  if (c.running) return renderChuteRunning(main, c);
+  main.append(h('section', { class: 'card' },
+    h('label', { class: 'lbl' }, 'What are you doing at the chute?'),
+    h('div', { class: 'jobs' }, JOBS.map(([k, label, sub]) =>
+      h('button', { class: 'job' + (c.job === k ? ' on' : ''), onclick: () => { c.job = k; saveChute(); render(); } },
+        h('strong', null, label), h('span', { class: 'small' }, sub)))),
+    h('p', { class: 'muted small' }, 'Nothing entered at the chute counts as doctoring or goes on a cowboy\'s record.')));
+  ({ process: setupProcess, mass: renderMass, implant: setupImplant, weigh: setupWeigh, sale: setupSale, import: renderImport })[c.job](main);
+}
+
+function setupProcess(main) {
+  const c = chuteState();
+  const s = c.process || (c.process = { purchaseDate: '', origin: '', originOther: '', invoice: '', pasture: '', drug: 'HR1 Draxxin', treatAll: false, startTag: '' });
+  const date = h('input', { class: 'input', type: 'date', id: 'purchaseDate', value: s.purchaseDate, onchange: () => { s.purchaseDate = date.value; saveChute(); } });
+  const other = h('input', { class: 'input', placeholder: 'Where from?', value: s.originOther, oninput: () => { s.originOther = other.value; saveChute(); } });
+  const inv = h('input', { class: 'input', placeholder: 'Invoice # (optional)', value: s.invoice, oninput: () => { s.invoice = inv.value; saveChute(); } });
+  const start = h('input', { class: 'input tagnum', id: 'startTag', inputmode: 'numeric', autocomplete: 'off', placeholder: 'First tag #', value: s.startTag,
+    oninput: () => { start.value = start.value.replace(/\D/g, ''); s.startTag = start.value; saveChute(); } });
+  main.append(h('section', { class: 'card' },
+    h('label', { class: 'lbl' }, 'Purchase date (from the invoice)'), date,
+    h('p', { class: 'muted small' }, 'Leave it blank if you don\'t have it. An admin can fill it in later for the whole group.'),
+    h('label', { class: 'lbl' }, 'Bought from'),
+    h('div', { class: 'chips' }, origins().map((o) =>
+      h('button', { class: 'chip' + (s.origin === o ? ' on' : ''), onclick: () => { s.origin = s.origin === o ? '' : o; saveChute(); render(); } }, o))),
+    s.origin === 'Other' ? other : null,
+    h('label', { class: 'lbl' }, 'Invoice #'), inv,
+    h('label', { class: 'lbl' }, 'Pasture they go to'), pastureSelect(s.pasture, (v) => { s.pasture = v; saveChute(); }, 'Not sure yet'),
+    h('label', { class: 'lbl' }, 'Mass treatment drug'), drugChips(s.drug, (d) => { s.drug = d; saveChute(); render(); }),
+    h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: s.treatAll || undefined, onchange: (e) => { s.treatAll = e.target.checked; saveChute(); } }),
+      ' Treat every calf from the start'),
+    h('p', { class: 'muted small' }, `Leave this off to temp the first head. The app counts how many are over ${MASS_TEMP.toFixed(1)}°F and tells you when it's more than half.`),
+    h('label', { class: 'lbl' }, 'First tag #'), start,
+    h('p', { class: 'muted small' }, 'Tags go up by one after each calf. You can always type a different number.'),
+    h('button', { class: 'btn save', onclick: startProcessing }, 'Start processing')));
+  batchList(main);
+}
+
+function startProcessing() {
+  const c = chuteState();
+  const s = c.process;
+  if (s.origin === 'Other' && !s.originOther.trim()) return toast('Type where they came from');
+  const b = newEntry('batch', {
+    batchType: 'processing', purchaseDate: s.purchaseDate || '', origin: s.origin || '',
+    originOther: s.origin === 'Other' ? s.originOther.trim() : '', invoice: s.invoice.trim(), pasture: s.pasture || '',
+    drug: s.drug || '', dose: doseFor(s.drug), treatAll: !!s.treatAll,
+  });
+  put(b);
+  Object.assign(c, { running: true, batchId: b.id, startedAt: Date.now(), treatAll: !!s.treatAll, recent: [],
+    form: { tag: s.startTag || '', weight: '', temp: '', treat: null } });
+  saveChute();
+  focusLater(s.startTag ? 'chuteWeight' : 'chuteTag');
+  render();
+}
+
+function continueBatch(b) {
+  const c = chuteState();
+  const done = state.all.filter((e) => e.kind === 'process' && e.batchId === b.id);
+  const top = done.reduce((m, e) => Math.max(m, Number(e.tagNum) || 0), 0);
+  Object.assign(c, { job: 'process', running: true, batchId: b.id, startedAt: Date.now(), treatAll: !!b.treatAll, recent: [],
+    form: { tag: top ? String(top + 1) : '', weight: '', temp: '', treat: null } });
+  saveChute();
+  render();
+}
+
+function batchCalves(b) {
+  return state.all.filter((e) => e.kind === 'process' && e.batchId === b.id);
+}
+
+function batchList(main) {
+  const bs = state.all.filter((e) => e.kind === 'batch').sort((a, b) => b.at - a.at);
+  if (!bs.length) return;
+  const missing = bs.filter((b) => b.batchType === 'processing' && !b.invoice).length;
+  main.append(h('section', { class: 'card' },
+    h('label', { class: 'lbl' }, `Groups this season (${bs.length})`),
+    missing && isAdmin() ? h('p', { class: 'small' }, `${missing} processing ${missing === 1 ? 'group has' : 'groups have'} no invoice # yet. Tap Edit to add it.`) : null,
+    h('div', { class: 'list' }, bs.map((b) => {
+      const n = batchCalves(b).length;
+      const mine = isAdmin() || b.enteredBy === myEmail();
+      const title = b.batchType === 'processing'
+        ? `${originLabel(b) || 'Origin not set'} · ${n} calves`
+        : `Mass treat · ${b.drug || 'drug ?'} · ${n} calves`;
+      const sub = b.batchType === 'processing'
+        ? [`Processed ${fmtDay(b.at)}`, b.purchaseDate ? `bought ${dateLabel(b.purchaseDate)}` : 'no purchase date', b.invoice ? `invoice ${b.invoice}` : 'no invoice #', b.pasture ? `→ ${b.pasture}` : ''].filter(Boolean).join(' · ')
+        : [fmtDay(b.at), b.pasture ? `from ${b.pasture}` : '', nameOf(b.enteredBy)].filter(Boolean).join(' · ');
+      return h('div', { class: 'batch-row' },
+        h('div', null, h('strong', null, title), h('div', { class: 'muted small' }, sub)),
+        h('div', { class: 'row' },
+          b.batchType === 'processing' ? h('button', { class: 'btn small', onclick: () => continueBatch(b) }, 'Continue') : null,
+          mine && b.batchType === 'processing' ? h('button', { class: 'btn small ghost', onclick: () => editBatch(b) }, 'Edit') : null,
+          mine ? h('button', { class: 'btn small ghost', onclick: () => undoBatch(b) }, 'Undo') : null));
+    }))));
+}
+
+function editBatch(b) {
+  let origin = b.origin || '';
+  const date = h('input', { class: 'input', type: 'date', value: b.purchaseDate || '' });
+  const other = h('input', { class: 'input', placeholder: 'Where from?', value: b.originOther || '' });
+  const inv = h('input', { class: 'input', placeholder: 'Invoice #', value: b.invoice || '' });
+  let pasture = b.pasture || '';
+  const sel = h('select', { class: 'input', onchange: () => { origin = sel.value; } },
+    h('option', { value: '' }, 'Not set'),
+    [...new Set([...origins(), origin].filter(Boolean))].map((o) => h('option', { value: o, selected: o === origin }, o)));
+  modal('Edit group', h('div', null,
+    h('p', { class: 'muted small' }, `Changes apply to all ${batchCalves(b).length} calves in this group.`),
+    h('label', { class: 'lbl' }, 'Purchase date'), date,
+    h('label', { class: 'lbl' }, 'Bought from'), sel, other,
+    h('label', { class: 'lbl' }, 'Invoice #'), inv,
+    h('label', { class: 'lbl' }, 'Pasture they went to'), pastureSelect(pasture, (v) => { pasture = v; }, 'Not set')), [
+    { label: 'Save', kind: 'primary', fn: () => {
+      put({ ...cleanEntry(b), purchaseDate: date.value, origin, originOther: origin === 'Other' ? other.value.trim() : '', invoice: inv.value.trim(), pasture, editedBy: myEmail(), editedAt: Date.now() });
+      toast('Group updated');
+    } },
+  ]);
+}
+
+function undoBatch(b) {
+  const list = batchCalves(b);
+  modal('Undo this group?', h('p', null, `Deletes the group and its ${list.length} calf records${b.batchType === 'processing' ? ' (weights and treatments from processing)' : ''}. Doctoring, implants and other weights aren't touched. This can't be undone.`), [
+    { label: `Delete ${list.length} records`, kind: 'danger', fn: () => {
+      Promise.all([...list, b].map(drop)).then(() => toast('Group deleted'));
+      const c = chuteState();
+      if (c.batchId === b.id) { c.running = false; saveChute(); }
+      render();
+    } },
+  ]);
+}
+
+function setupImplant(main) {
+  const c = chuteState();
+  const s = c.implant || (c.implant = { which: 'Reimplant', product: implantProducts()[0] || '' });
+  main.append(h('section', { class: 'card' },
+    h('label', { class: 'lbl' }, 'Implant or reimplant'),
+    seg([['Implant', 'Implant'], ['Reimplant', 'Reimplant']], s.which, (k) => { s.which = k; saveChute(); render(); }),
+    h('label', { class: 'lbl' }, 'Product'),
+    h('div', { class: 'chips' }, implantProducts().map((p) =>
+      h('button', { class: 'chip' + (s.product === p ? ' on' : ''), onclick: () => { s.product = p; saveChute(); render(); } }, p))),
+    h('p', { class: 'muted small' }, 'Weigh each calf as it goes through: type the weight, or let the scale fill it in.'),
+    h('button', { class: 'btn save', onclick: () => startLoop() }, `Start ${s.which.toLowerCase()}`)));
+}
+
+function setupWeigh(main) {
+  const c = chuteState();
+  const s = c.weigh || (c.weigh = { stage: 'Other' });
+  main.append(h('section', { class: 'card' },
+    h('label', { class: 'lbl' }, 'Why are you weighing?'),
+    h('div', { class: 'chips' }, WEIGH_STAGES.map((st) =>
+      h('button', { class: 'chip' + (s.stage === st ? ' on' : ''), onclick: () => { s.stage = st; saveChute(); render(); } }, st))),
+    h('button', { class: 'btn save', onclick: () => startLoop() }, 'Start weighing')));
+}
+
+function setupSale(main) {
+  const c = chuteState();
+  const s = c.sale || (c.sale = { collarOff: true });
+  main.append(h('section', { class: 'card' },
+    h('p', null, 'Record each calf that\'s sold. Calves with collars get a final weight when the collar comes off.'),
+    h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: s.collarOff || undefined, onchange: (e) => { s.collarOff = e.target.checked; saveChute(); } }), ' Collar removed'),
+    h('button', { class: 'btn save', onclick: () => startLoop() }, 'Start')));
+}
+
+function startLoop() {
+  const c = chuteState();
+  Object.assign(c, { running: true, batchId: null, startedAt: Date.now(), recent: [], form: { tag: '', weight: '', temp: '', treat: null } });
+  saveChute();
+  focusLater('chuteTag');
+  render();
+}
+
+function finishChute() {
+  const c = chuteState();
+  const n = c.job === 'process' && c.batchId ? batchCalves({ id: c.batchId }).length : (c.recent || []).length;
+  c.running = false;
+  c.form = null;
+  if (c.job === 'process' && c.process) c.process.startTag = '';
+  saveChute();
+  toast(`${JOB_NAME[c.job]} done · ${n} ${n === 1 ? 'calf' : 'calves'}`);
+  render();
+  window.scrollTo(0, 0);
+}
+
+function processStats(batchId) {
+  const list = state.all.filter((e) => e.kind === 'process' && e.batchId === batchId);
+  const temped = list.filter((e) => Number.isFinite(e.temp));
+  const hot = temped.filter((e) => e.temp > MASS_TEMP);
+  return { done: list.length, temped: temped.length, hot: hot.length, treated: list.filter((e) => e.treatment).length };
+}
+
+function renderChuteRunning(main, c) {
+  const f = c.form || (c.form = { tag: '', weight: '', temp: '', treat: null });
+  const job = c.job;
+  const batch = c.batchId ? state.all.find((e) => e.id === c.batchId) : null;
+  let title = JOB_NAME[job];
+  let sub = '';
+  if (job === 'process') {
+    const b = batch || {};
+    sub = [originLabel(b), b.purchaseDate ? `bought ${dateLabel(b.purchaseDate)}` : '', b.pasture ? `→ ${b.pasture}` : ''].filter(Boolean).join(' · ');
+  } else if (job === 'implant') {
+    title = c.implant.which;
+    sub = c.implant.product;
+  } else if (job === 'weigh') sub = `${c.weigh.stage} weights`;
+  else if (job === 'sale') sub = c.sale.collarOff ? 'Collar removed' : 'Collar stays on';
+
+  main.append(h('section', { class: 'card chute-head' },
+    h('div', null, h('div', { class: 'chute-title' }, title), sub ? h('div', { class: 'muted small' }, sub) : null),
+    h('button', { class: 'btn small', onclick: finishChute }, 'Finish')));
+
+  // Processing: running count, temps, and the switch to mass treating.
+  const drug = batch ? batch.drug : '';
+  if (job === 'process') {
+    const st = processStats(c.batchId);
+    const share = st.temped ? st.hot / st.temped : 0;
+    main.append(h('section', { class: 'card' },
+      h('div', { class: 'stat-row' },
+        h('div', null, h('div', { class: 'tile-v' }, st.done), h('div', { class: 'small' }, 'calves done')),
+        h('div', null, h('div', { class: 'tile-v' }, st.temped ? pct(st.hot, st.temped) : '–'), h('div', { class: 'small' }, `over ${MASS_TEMP.toFixed(1)}° (${st.hot} of ${st.temped} temped)`))),
+      !c.treatAll && st.temped >= 10 && share > MASS_SWITCH_SHARE && drug
+        ? h('div', { class: 'warn' }, `More than half are over ${MASS_TEMP.toFixed(1)}°F. `,
+          h('button', { class: 'btn small primary', onclick: () => { c.treatAll = true; f.treat = null; saveChute(); render(); } }, `Mass treat the rest with ${drug}`))
+        : null,
+      drug ? h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: c.treatAll || undefined, onchange: (e) => { c.treatAll = e.target.checked; f.treat = null; saveChute(); render(); } }),
+        ` Mass treat every calf with ${drug} (no temps needed)`) : h('p', { class: 'muted small' }, 'No mass treatment drug picked for this group.')));
+  }
+  if (job === 'implant') {
+    main.append(h('div', { class: 'chips', style: { marginBottom: '12px' } }, implantProducts().map((p) =>
+      h('button', { class: 'chip' + (c.implant.product === p ? ' on' : ''), onclick: () => { c.implant.product = p; saveChute(); render(); } }, p))));
+  }
+
+  const sequential = job === 'process';
+  const askTemp = job === 'process' && !c.treatAll;
+  const tag = h('input', { class: 'input tagnum', id: 'chuteTag', inputmode: 'numeric', pattern: '[0-9]*', autocomplete: 'off', placeholder: 'Tag #', value: f.tag,
+    oninput: () => { tag.value = tag.value.replace(/\D/g, ''); f.tag = tag.value; saveChute(); showTagInfo(); },
+    onkeydown: (e) => { if (e.key === 'Enter') { e.preventDefault(); document.getElementById('chuteWeight').focus(); } } });
+  const weight = h('input', { class: 'input tagnum', id: 'chuteWeight', inputmode: 'decimal', autocomplete: 'off', placeholder: job === 'weigh' ? 'Weight (lb)' : 'Weight (lb), optional', value: f.weight,
+    oninput: () => { f.weight = weight.value; saveChute(); },
+    onkeydown: (e) => { if (e.key === 'Enter') { e.preventDefault(); if (askTemp) document.getElementById('chuteTemp').focus(); else saveChuteCalf(); } } });
+  const temp = askTemp ? h('input', { class: 'input temp', id: 'chuteTemp', inputmode: 'decimal', autocomplete: 'off', placeholder: 'Temp, optional (4.2 = 104.2)', value: f.temp,
+    oninput: () => { f.temp = temp.value; saveChute(); drawTreat(); },
+    onkeydown: (e) => { if (e.key === 'Enter') { e.preventDefault(); saveChuteCalf(); } } }) : null;
+  const tagInfo = h('div', { id: 'chuteTagInfo', class: 'muted small' });
+  const treatBox = h('div', { id: 'treatBox' });
+  function showTagInfo() {
+    const n = cleanTagNum(f.tag || '');
+    const calf = n ? calfOf(n) : null;
+    if (!n) return tagInfo.replaceChildren();
+    if (!calf) return tagInfo.replaceChildren(job === 'process' ? '' : h('span', { class: 'warn-text' }, 'No record for this tag yet. It will be added.'));
+    const bits = [calf.processedAt ? `processed ${fmtDay(calf.processedAt)}` : '', calf.lastWeight ? `last ${fmtLb(calf.lastWeight)}` : '', calf.status !== 'alive' ? calf.status.toUpperCase() : ''].filter(Boolean);
+    tagInfo.replaceChildren(job === 'process' && calf.processedAt ? h('span', { class: 'warn-text' }, `⚠ ${seasonTag(n)} was already processed ${fmtDay(calf.processedAt)}.`) : bits.join(' · '));
+  }
+  function treatNow() {
+    if (f.treat !== null && f.treat !== undefined) return f.treat;
+    const t = readTemp(f.temp);
+    if (Number.isFinite(t)) return t > MASS_TEMP;
+    return !!c.treatAll;
+  }
+  function drawTreat() {
+    if (job !== 'process' || !drug) return treatBox.replaceChildren();
+    const on = treatNow();
+    const t = readTemp(f.temp);
+    const why = f.treat !== null && f.treat !== undefined ? '' : Number.isFinite(t) ? (t > MASS_TEMP ? ` (over ${MASS_TEMP.toFixed(1)}°)` : ` (${MASS_TEMP.toFixed(1)}° or under)`) : c.treatAll ? ' (mass treating)' : ' (no temp)';
+    treatBox.replaceChildren(h('button', { class: 'chip treat' + (on ? ' on' : ''), onclick: () => { f.treat = !on; saveChute(); drawTreat(); } },
+      on ? `✓ Give ${drug}` : `No ${drug}`, h('span', { class: 'small' }, why)));
+  }
+  f.treatNow = treatNow;
+
+  main.append(h('section', { class: 'card' },
+    h('label', { class: 'lbl' }, 'Tag', seasonColor() ? h('span', { class: 'season-color' }, colorSwatch(seasonColor()), `${cap(seasonColor())} · ${season()}`) : null),
+    tag, tagInfo,
+    h('label', { class: 'lbl' }, 'Weight'), weight,
+    askTemp ? [h('label', { class: 'lbl' }, 'Temperature °F'), temp] : null,
+    treatBox,
+    h('div', { id: 'chuteError' }),
+    h('button', { class: 'btn save', id: 'chuteSave', onclick: () => saveChuteCalf() }, sequential ? 'Save · next calf' : 'Save'),
+    h('p', { class: 'muted small' }, 'Pressing Enter (or Done) on the last box saves. With the scale paired as a keyboard, the weight saves itself.')));
+  showTagInfo();
+  drawTreat();
+
+  if (job === 'process' && c.batchId) bulkAdd(main, c, batch);
+
+  const recent = (c.recent || []).map((r) => state.all.find((e) => e.id === r.id) || null).filter(Boolean);
+  main.append(h('section', { class: 'card' },
+    h('label', { class: 'lbl' }, `Just done (${(c.recent || []).length})`),
+    recent.length ? h('div', { class: 'list' }, recent.map((e) => lifeRow(e))) : h('p', { class: 'muted' }, 'Nothing yet.')));
+  if (!f.tag || !sequential) focusLater(f.tag ? 'chuteWeight' : 'chuteTag');
+  else focusLater('chuteWeight');
+}
+
+function saveChuteCalf(opts = {}) {
+  const c = chuteState();
+  const f = c.form;
+  const err = (msg) => {
+    const box = document.getElementById('chuteError');
+    if (box) box.replaceChildren(h('div', { class: 'error' }, msg));
+    return false;
+  };
+  const tag = cleanTagNum((f.tag || '').replace(/\D/g, ''));
+  if (!tag) return err('Enter the tag number.');
+  const w = readWeight(f.weight);
+  if (!weightOk(w)) return err('That weight looks off (expected 50–3,000 lb).');
+  if (c.job === 'weigh' && w === null) return err('Enter the weight.');
+  const t = c.job === 'process' && !c.treatAll ? readTemp(f.temp) : null;
+  if (Number.isNaN(t)) return err('That temperature looks off (expected 95–110°F).');
+  const calf = calfOf(tag);
+  if (c.job === 'process' && calf && calf.processedAt && !opts.dupOk) {
+    modal(`${seasonTag(tag)} already processed`, h('p', null, `It was processed ${fmtDay(calf.processedAt)}. Save it again anyway?`), [
+      { label: 'Save anyway', kind: 'primary', fn: () => { saveChuteCalf({ dupOk: true }); } },
+    ]);
+    return false;
+  }
+  let e;
+  if (c.job === 'process') {
+    const batch = state.all.find((x) => x.id === c.batchId) || {};
+    const treated = !!(batch.drug && f.treatNow && f.treatNow());
+    e = calfEntry('process', tag, { batchId: c.batchId, weight: w, temp: t, treatment: treated ? batch.drug : '', dose: treated ? doseFor(batch.drug) : '' });
+  } else if (c.job === 'implant') {
+    e = calfEntry('implant', tag, { which: c.implant.which, product: c.implant.product, weight: w });
+  } else if (c.job === 'weigh') {
+    e = calfEntry('weigh', tag, { weight: w, stage: c.weigh.stage, source: 'chute' });
+  } else if (c.job === 'sale') {
+    e = calfEntry('sale', tag, { weight: w, collarOff: !!c.sale.collarOff });
+  }
+  put(e);
+  c.recent = [{ id: e.id }, ...(c.recent || [])].slice(0, 15);
+  const next = c.job === 'process' ? String(Number(tag) + 1) : '';
+  c.form = { tag: next, weight: '', temp: '', treat: null };
+  saveChute();
+  render();
+  return true;
+}
+
+function bulkAdd(main, c, batch) {
+  const box = h('textarea', { class: 'input', rows: 2, placeholder: 'e.g. 201-340, or 201 through 340' });
+  const info = h('p', { class: 'small' });
+  let treat = !!c.treatAll;
+  const upd = () => {
+    const { tags, bad } = parseTagList(box.value);
+    info.textContent = box.value.trim() ? `${tags.length} calves${bad.length ? ` · couldn't read: ${bad.join(', ')}` : ''}` : '';
+  };
+  box.addEventListener('input', upd);
+  main.append(h('details', { class: 'card bulk' },
+    h('summary', null, 'Add a run of tags at once (no weights)'),
+    h('p', { class: 'muted small' }, 'For mass treating straight through: give the first and last tag. Dropped or broken tags? List them, like "201-250, 252, 255-340".'),
+    box, info,
+    batch && batch.drug ? h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: treat || undefined, onchange: (e) => { treat = e.target.checked; } }), ` All got ${batch.drug}`) : null,
+    h('button', { class: 'btn primary', onclick: () => {
+      const { tags } = parseTagList(box.value);
+      if (!tags.length) return toast('Enter the tag numbers');
+      const already = new Set(batchCalves({ id: c.batchId }).map((e) => cleanTagNum(e.tagNum)));
+      const fresh = tags.filter((t) => !already.has(t));
+      const drug = batch && treat ? batch.drug : '';
+      modal(`Add ${fresh.length} calves?`, h('p', null, `${tags[0]}${tags.length > 1 ? ' – ' + tags[tags.length - 1] : ''}${drug ? `, all treated with ${drug}` : ', not treated'}.${tags.length - fresh.length ? ` ${tags.length - fresh.length} already in this group are skipped.` : ''}`), [
+        { label: `Add ${fresh.length}`, kind: 'primary', fn: () => {
+          const now = Date.now();
+          const list = fresh.map((t, i) => ({ ...calfEntry('process', t, { batchId: c.batchId, weight: null, temp: null, treatment: drug, dose: drug ? doseFor(drug) : '' }), at: now + i }));
+          list.forEach(put);
+          c.recent = [...list.slice(-15).reverse().map((e) => ({ id: e.id })), ...(c.recent || [])].slice(0, 15);
+          const top = Math.max(...fresh.map(Number));
+          c.form = { tag: String(top + 1), weight: '', temp: '', treat: null };
+          saveChute();
+          toast(`Added ${list.length} calves`);
+          render();
+        } },
+      ]);
+    } }, 'Add these calves')));
+}
+
+// ---------- mass treat calves already on the place ----------
+function renderMass(main) {
+  const c = chuteState();
+  const m = c.mass || (c.mass = { drug: 'HR1 Draxxin', source: 'tags', tagText: '', pasture: '', skip: [], notes: '' });
+  const info = h('div', { id: 'massInfo' });
+  let pick = () => [];
+  const body = [];
+  if (m.source === 'tags') {
+    const box = h('textarea', { class: 'input', rows: 3, placeholder: 'e.g. 101-140, 145, 150', value: m.tagText });
+    box.value = m.tagText;
+    pick = () => parseTagList(m.tagText).tags;
+    const upd = () => {
+      const { tags, bad } = parseTagList(m.tagText);
+      const unknown = tags.filter((t) => !calfOf(t)).length;
+      info.replaceChildren(h('p', { class: 'small' }, tags.length ? `${tags.length} calves` : '',
+        unknown ? ` · ${unknown} have no record yet (they'll be added)` : '',
+        bad.length ? h('span', { class: 'warn-text' }, ` · couldn't read: ${bad.join(', ')}`) : ''));
+    };
+    box.addEventListener('input', () => { m.tagText = box.value; saveChute(); upd(); });
+    body.push(box, h('p', { class: 'muted small' }, 'Type or say the tags. Ranges work: "101 through 140".'));
+    upd();
+  } else {
+    const calves = m.pasture ? calvesInPasture(state.calves, m.pasture) : [];
+    const appCount = m.pasture ? (counts().get(m.pasture) || {}).count : null;
+    pick = () => calves.map((s) => s.tag).filter((t) => !m.skip.includes(t));
+    body.push(pastureSelect(m.pasture, (v) => { m.pasture = v; m.skip = []; saveChute(); render(); }));
+    if (m.pasture) {
+      body.push(h('p', { class: 'small' },
+        `The app knows ${calves.length} tagged calves last seen in ${m.pasture}`,
+        appCount !== null && appCount !== undefined ? `; head count there is ${appCount}.` : '.',
+        ' Check the list and untick any that aren\'t there.'));
+      body.push(h('div', { class: 'check-list' }, calves.map((s) => h('label', { class: 'chk' },
+        h('input', { type: 'checkbox', checked: !m.skip.includes(s.tag) || undefined, onchange: (e) => {
+          m.skip = e.target.checked ? m.skip.filter((x) => x !== s.tag) : [...m.skip, s.tag];
+          saveChute();
+          info.replaceChildren(h('p', { class: 'small' }, `${pick().length} calves picked`));
+        } }),
+        ` ${s.tag}`, h('span', { class: 'muted small' }, ` ${s.lastWeight ? fmtLb(s.lastWeight) : ''}${s.pastureUnconfirmed ? ' · may have moved' : ''}`)))));
+      info.replaceChildren(h('p', { class: 'small' }, `${pick().length} calves picked`));
+    }
+  }
+  const notes = h('input', { class: 'input', placeholder: 'Notes (optional)', value: m.notes, oninput: () => { m.notes = notes.value; saveChute(); } });
+  main.append(h('section', { class: 'card' },
+    h('p', { class: 'small' }, 'For a group that\'s already here and getting sick. Every calf gets the same drug, and nobody is credited with doctoring them.'),
+    h('label', { class: 'lbl' }, 'Drug'), drugChips(m.drug, (d) => { m.drug = d; saveChute(); render(); }),
+    h('label', { class: 'lbl' }, 'Which calves'),
+    seg([['tags', 'Tag numbers'], ['pasture', 'Everyone in a pasture']], m.source, (k) => { m.source = k; saveChute(); render(); }),
+    body, info,
+    h('label', { class: 'lbl' }, 'Notes'), notes,
+    h('button', { class: 'btn save', onclick: () => {
+      const tags = pick();
+      if (!m.drug) return toast('Pick the drug');
+      if (!tags.length) return toast('Pick the calves');
+      modal(`Mass treat ${tags.length} calves?`, h('p', null, `${m.drug}${doseFor(m.drug) ? ' · ' + doseFor(m.drug) : ''}. Shows on each calf's history. Not counted as doctoring.`), [
+        { label: 'Save', kind: 'primary', fn: () => {
+          const b = newEntry('batch', { batchType: 'mass', drug: m.drug, dose: doseFor(m.drug), pasture: m.source === 'pasture' ? m.pasture : '', notes: m.notes.trim() });
+          put(b);
+          const now = Date.now();
+          tags.forEach((t, i) => put({ ...calfEntry('process', t, { batchId: b.id, weight: null, temp: null, treatment: m.drug, dose: doseFor(m.drug) }), at: now + i }));
+          c.mass = { ...m, tagText: '', skip: [], notes: '' };
+          saveChute();
+          toast(`Mass treatment saved for ${tags.length} calves`);
+          render();
+        } },
+      ]);
+    } }, 'Save mass treatment')));
+  batchList(main);
+}
+
+// ---------- scale file import ----------
+function renderImport(main) {
+  const imp = state.imp || (state.imp = { rows: null, header: [], cols: null, unit: 'lb', stage: 'Arrival', date: dayKey(Date.now()), fileName: '' });
+  const picker = h('input', { type: 'file', accept: '.csv,.txt,text/csv,text/plain', class: 'hidden-file', onchange: async () => {
+    const file = picker.files[0];
+    if (!file) return;
+    if (/\.xlsx?$/i.test(file.name)) { toast('That\'s an Excel file. Save or export it as CSV, then pick that.'); return; }
+    const rows = parseCSV(await file.text());
+    if (rows.length < 2) { toast('Couldn\'t find any rows in that file'); return; }
+    Object.assign(imp, { rows: rows.slice(1), header: rows[0], cols: guessColumns(rows[0]), fileName: file.name });
+    render();
+  } });
+  main.append(h('section', { class: 'card' },
+    h('p', { class: 'small' }, 'Bring in weights recorded on the Tru-Test S3. In the Datamars app, open the weigh session, export or share it as a CSV file, save it to your phone, then pick it here.'),
+    h('button', { class: 'btn', onclick: () => picker.click() }, imp.fileName ? `📄 ${imp.fileName} · pick another` : '📄 Pick the scale file'), picker));
+  if (!imp.rows) return;
+
+  const colSel = (key, label, allowNone) => {
+    const sel = h('select', { class: 'input', onchange: () => { imp.cols[key] = Number(sel.value); render(); } },
+      allowNone ? h('option', { value: -1, selected: imp.cols[key] < 0 }, '— none —') : null,
+      imp.header.map((hd, i) => h('option', { value: i, selected: imp.cols[key] === i }, hd || `Column ${i + 1}`)));
+    return [h('label', { class: 'lbl' }, label), sel];
+  };
+  const { weights, skipped } = readWeights(imp.rows, imp.cols, { unit: imp.unit });
+  const fallback = imp.date === dayKey(Date.now()) ? Date.now() : new Date(imp.date + 'T12:00').getTime();
+  const plan = [];
+  let dupes = 0;
+  for (const w of weights) {
+    const at = w.at || fallback;
+    const calf = calfOf(w.tag);
+    if (calf && calf.weights.some((x) => x.weight === w.weight && dayKey(x.at) === dayKey(at))) { dupes++; continue; }
+    plan.push({ ...w, at, known: !!calf });
+  }
+  const known = plan.filter((p) => p.known).length;
+  const dateIn = h('input', { class: 'input', type: 'date', value: imp.date, onchange: () => { imp.date = dateIn.value; render(); } });
+  main.append(h('section', { class: 'card' },
+    colSel('tag', 'Tag number column (VID)', false),
+    colSel('weight', 'Weight column', false),
+    colSel('date', 'Date column', true),
+    h('label', { class: 'lbl' }, 'Units'), seg([['lb', 'Pounds'], ['kg', 'Kilograms']], imp.unit, (k) => { imp.unit = k; render(); }),
+    h('label', { class: 'lbl' }, 'These weights are'),
+    h('div', { class: 'chips' }, WEIGH_STAGES.map((st) => h('button', { class: 'chip' + (imp.stage === st ? ' on' : ''), onclick: () => { imp.stage = st; render(); } }, st))),
+    h('label', { class: 'lbl' }, 'Date to use when a row has none'), dateIn,
+    h('div', { class: 'notice' }, `${plan.length} weights to add · ${known} match calves on record · ${plan.length - known} new tags`,
+      dupes ? ` · ${dupes} already in the app (skipped)` : '', skipped ? ` · ${skipped} rows without a tag or weight (skipped)` : ''),
+    plan.length ? h('div', { class: 'table-wrap' }, h('table', null,
+      h('thead', null, h('tr', null, ['Tag', 'Weight', 'Date', ''].map((x) => h('th', null, x)))),
+      h('tbody', null, plan.slice(0, 8).map((p) => h('tr', null, h('td', null, p.tag), h('td', null, fmtLb(p.weight)), h('td', null, fmtDay(p.at)), h('td', { class: 'muted small' }, p.known ? '' : 'new')))))) : null,
+    plan.length > 8 ? h('p', { class: 'muted small' }, `…and ${plan.length - 8} more`) : null,
+    h('button', { class: 'btn save', disabled: !plan.length || undefined, onclick: () => {
+      plan.forEach((p, i) => put({ ...calfEntry('weigh', p.tag, { weight: p.weight, stage: imp.stage, source: 'import', file: imp.fileName }), at: p.at + i }));
+      toast(`Imported ${plan.length} weights`);
+      state.imp = null;
+      render();
+    } }, `Import ${plan.length} weights`)));
+}
+
+// ---------- one line in a calf's story ----------
+function lifeLine(e) {
+  const tag = e.tagNum ? seasonTag(e.tagNum) : '';
+  const w = Number.isFinite(e.weight) ? fmtLb(e.weight) : '';
+  switch (e.kind) {
+    case 'process': {
+      const b = state.all.find((x) => x.id === e.batchId);
+      const mass = b && b.batchType === 'mass';
+      return { icon: mass ? '💉' : '🐂', title: mass ? `Mass treated: ${e.treatment}` : 'Processed',
+        sub: [w, Number.isFinite(e.temp) ? e.temp + '°' : '', !mass ? (e.treatment ? `got ${e.treatment}` : 'not treated') : 'no cowboy credited', !mass && b ? originLabel(b) : ''].filter(Boolean).join(' · '), tag };
+    }
+    case 'implant': return { icon: '💊', title: `${e.which || 'Implant'} · ${e.product || 'product ?'}`, sub: w, tag };
+    case 'weigh': return { icon: '⚖️', title: `Weighed ${w}`, sub: [e.stage, e.source === 'import' ? 'from scale file' : ''].filter(Boolean).join(' · '), tag };
+    case 'sale': return { icon: '💲', title: 'Sold', sub: [w, e.collarOff ? 'collar removed' : ''].filter(Boolean).join(' · '), tag };
+    case 'pull': return { icon: '🩺', title: `Pulled · ${e.treatment || '—'}`, sub: [e.temp ? e.temp + '°' : 'no temp', e.diagnosis, nameOf(e.pulledBy), e.location].filter(Boolean).join(' · '), tag };
+    case 'death': return { icon: '☠️', title: `Died · ${e.cause || 'cause ?'}`, sub: [nameOf(e.pulledBy), e.location].filter(Boolean).join(' · '), tag };
+    case 'move': return { icon: '➡️', title: `Moved to ${e.to}`, sub: `from ${e.from}`, tag };
+    default: return { icon: '•', title: e.kind, sub: '', tag };
+  }
+}
+
+function lifeRow(e, { showTag = true } = {}) {
+  const l = lifeLine(e);
+  const doctor = e.kind === 'pull' || e.kind === 'death';
+  const tap = doctor ? () => (canEdit(e) ? startEdit(e) : showEntry(e)) : canEdit(e) && e.kind !== 'move' ? () => editEvent(e) : null;
+  return h(tap ? 'button' : 'div', { class: 'entry life' + (e.kind === 'death' ? ' dead' : ''), onclick: tap || undefined },
+    h('div', { class: 'entry-top' },
+      h('strong', null, `${l.icon} ${showTag && l.tag ? l.tag + ' · ' : ''}${l.title}`),
+      h('span', { class: 'muted small' }, fmtWhen(e.at), e._pending ? ' · ⏳' : '')),
+    l.sub ? h('div', { class: 'muted small' }, l.sub) : null);
+}
+
+function editEvent(e) {
+  const tag = h('input', { class: 'input', inputmode: 'numeric', value: e.tagNum || '' });
+  const weight = h('input', { class: 'input', inputmode: 'decimal', placeholder: 'Weight (lb)', value: Number.isFinite(e.weight) ? String(e.weight) : '' });
+  let product = e.product || '';
+  let treated = !!e.treatment;
+  const extra = [];
+  if (e.kind === 'implant') {
+    extra.push(h('label', { class: 'lbl' }, 'Product'), h('div', { class: 'chips' }, [...new Set([...implantProducts(), product].filter(Boolean))].map((p) =>
+      h('button', { class: 'chip' + (p === product ? ' on' : ''), onclick: (ev) => { product = p; ev.target.parentNode.querySelectorAll('.chip').forEach((x) => x.classList.toggle('on', x === ev.target)); } }, p))));
+  }
+  const b = e.kind === 'process' ? state.all.find((x) => x.id === e.batchId) : null;
+  const drug = e.treatment || (b && b.drug) || '';
+  if (e.kind === 'process' && drug) {
+    extra.push(h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: treated || undefined, onchange: (ev) => { treated = ev.target.checked; } }), ` Got ${drug}`));
+  }
+  modal(`Fix ${seasonTag(e.tagNum)} · ${lifeLine(e).title}`, h('div', null,
+    h('label', { class: 'lbl' }, 'Tag #'), tag,
+    h('label', { class: 'lbl' }, 'Weight'), weight, extra,
+    h('p', { class: 'muted small' }, `Entered by ${nameOf(e.enteredBy)} · ${fmtWhen(e.at)}`)), [
+    { label: 'Save', kind: 'primary', fn: () => {
+      const n = cleanTagNum(tag.value.replace(/\D/g, ''));
+      const w = readWeight(weight.value);
+      if (!n) { toast('Enter the tag number'); return false; }
+      if (!weightOk(w)) { toast('That weight looks off'); return false; }
+      const upd = { ...cleanEntry(e), tagNum: n, tagKey: tagKey(e.season, n), weight: w, editedBy: myEmail(), editedAt: Date.now() };
+      if (e.kind === 'implant') upd.product = product;
+      if (e.kind === 'process') { upd.treatment = treated ? drug : ''; upd.dose = treated ? e.dose || doseFor(drug) : ''; }
+      put(upd);
+      toast('Saved');
+      setTimeout(render, 0);
+    } },
+    { label: 'Delete', kind: 'danger', fn: () => {
+      drop(e);
+      const c = state.chute;
+      if (c && c.recent) { c.recent = c.recent.filter((r) => r.id !== e.id); saveChute(); }
+      toast('Deleted');
+      setTimeout(render, 0);
+    } },
+  ]);
+}
+
+// Add a weight, implant or sale from the calf's page.
+function quickEvent(kind, tag) {
+  const weight = h('input', { class: 'input tagnum', inputmode: 'decimal', placeholder: kind === 'weigh' ? 'Weight (lb)' : 'Weight (lb), optional' });
+  let product = implantProducts()[0] || '';
+  let which = 'Reimplant';
+  let stage = 'Other';
+  let collar = true;
+  const extra = [];
+  if (kind === 'implant') {
+    extra.push(
+      h('div', { class: 'chips' }, ['Implant', 'Reimplant'].map((x) => h('button', { class: 'chip' + (x === which ? ' on' : ''), onclick: (ev) => { which = x; ev.target.parentNode.querySelectorAll('.chip').forEach((y) => y.classList.toggle('on', y === ev.target)); } }, x))),
+      h('label', { class: 'lbl' }, 'Product'),
+      h('div', { class: 'chips' }, implantProducts().map((p) => h('button', { class: 'chip' + (p === product ? ' on' : ''), onclick: (ev) => { product = p; ev.target.parentNode.querySelectorAll('.chip').forEach((y) => y.classList.toggle('on', y === ev.target)); } }, p))));
+  }
+  if (kind === 'weigh') {
+    extra.push(h('div', { class: 'chips' }, WEIGH_STAGES.map((x) => h('button', { class: 'chip' + (x === stage ? ' on' : ''), onclick: (ev) => { stage = x; ev.target.parentNode.querySelectorAll('.chip').forEach((y) => y.classList.toggle('on', y === ev.target)); } }, x))));
+  }
+  if (kind === 'sale') extra.push(h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: true, onchange: (ev) => { collar = ev.target.checked; } }), ' Collar removed'));
+  const title = { weigh: 'Add a weight', implant: 'Implant', sale: 'Sold' }[kind];
+  modal(`${title} · ${seasonTag(tag)}`, h('div', null, extra, h('label', { class: 'lbl' }, 'Weight'), weight), [
+    { label: 'Save', kind: 'primary', fn: () => {
+      const w = readWeight(weight.value);
+      if (!weightOk(w) || (kind === 'weigh' && w === null)) { toast(kind === 'weigh' ? 'Enter the weight' : 'That weight looks off'); return false; }
+      const e = kind === 'weigh' ? calfEntry('weigh', tag, { weight: w, stage, source: 'manual' })
+        : kind === 'implant' ? calfEntry('implant', tag, { which, product, weight: w })
+          : calfEntry('sale', tag, { weight: w, collarOff: collar });
+      put(e);
+      toast('Saved');
+      setTimeout(render, 0);
+    } },
+  ]);
+}
+
+// ---------- calf lookup: the whole story ----------
+function renderLookup(main) {
+  const L = state.lookup;
+  const results = h('div', { id: 'lookupResults' });
+  const num = h('input', { class: 'input tagnum', id: 'lookupNum', inputmode: 'numeric', pattern: '[0-9]*', placeholder: 'Tag #', value: L.num,
+    oninput: () => { num.value = num.value.replace(/\D/g, ''); L.num = num.value; drawLookup(results); } });
+  const heard = h('p', { class: 'heard' });
+  const sayBox = browserVoice() ? null : h('input', { class: 'input', placeholder: 'Or tap here, then the 🎤 on your keyboard', autocomplete: 'off', enterkeyhint: 'search',
+    onkeydown: (e) => { if (e.key === 'Enter') { lookupSaid(sayBox.value); sayBox.value = ''; sayBox.blur(); } } });
+  const lookupSaid = (t) => {
+    const p = parseUtterance(t, voiceCtx());
+    const n = p.tagNum || ((t || '').match(/\d+/) || [])[0];
+    if (n) { L.num = cleanTagNum(n); render(); } else heard.textContent = `Heard "${t}". Say the tag number.`;
+  };
+  const mic = browserVoice() ? h('button', { class: 'btn', onclick: () => {
+    stopVoice();
+    heard.textContent = 'Listening… say the tag';
+    stopListening = listen({
+      onInterim: (t) => { heard.textContent = t; },
+      onFinal: (t) => lookupSaid(t),
+      onError: () => { heard.textContent = 'Didn\'t catch that. Tap and try again, or type it.'; },
+      onEnd: () => {},
+    });
+  } }, '🎤 Say it') : null;
+  main.append(h('section', { class: 'card' },
+    h('label', { class: 'lbl' }, 'Look up a calf',
+      seasonColor() ? h('span', { class: 'season-color' }, colorSwatch(seasonColor()), `${cap(seasonColor())} · ${season()}`) : null),
+    h('div', { class: 'row' }, num, mic), sayBox, heard), results);
+  drawLookup(results);
+
+  // Watch list: calves pulled more than once
+  const multi = [...state.byTag.values()].filter((l) => l.filter((e) => e.kind === 'pull').length >= 2 && !l.some((e) => e.kind === 'death'))
+    .sort((a, b) => b[b.length - 1].at - a[a.length - 1].at).slice(0, 30);
+  main.append(h('section', { class: 'card' },
+    h('label', { class: 'lbl' }, `Pulled 2+ times (${multi.length})`),
+    multi.length ? h('div', { class: 'list' }, multi.map((l) => {
+      const last = l[l.length - 1];
+      return h('button', { class: 'entry', onclick: () => { L.num = last.tagNum; render(); window.scrollTo(0, 0); } },
+        h('div', { class: 'entry-top' }, h('strong', null, tagLabel(last, season())), h('span', { class: 'muted small' }, `${l.filter((e) => e.kind === 'pull').length} pulls`)),
+        h('div', { class: 'muted small' }, `Last: ${fmtWhen(last.at)} · ${last.treatment || last.cause || ''}`));
+    })) : h('p', { class: 'muted' }, 'None yet.')));
+}
+
+function drawLookup(el) {
+  const L = state.lookup;
+  if (!L.num) return el.replaceChildren();
+  const n = cleanTagNum(L.num);
+  const calf = calfOf(n);
+  const actions = h('div', { class: 'actions' },
+    h('button', { class: 'btn small', onclick: () => quickEvent('weigh', n) }, '+ Weight'),
+    h('button', { class: 'btn small', onclick: () => quickEvent('implant', n) }, '+ Implant'),
+    h('button', { class: 'btn small', onclick: () => quickEvent('sale', n) }, 'Sold'));
+  if (!calf) {
+    return el.replaceChildren(h('section', { class: 'card' }, h('p', null, `No record for ${seasonTag(n)} this season.`), actions));
+  }
+  const b = calf.arrival;
+  const last = calf.weights[calf.weights.length - 1];
+  const daysSince = calf.purchasedAt ? Math.floor((Date.now() - calf.purchasedAt) / 86400000) : null;
+  const fact = (k, v) => h('div', { class: 'fact' }, h('span', { class: 'muted small' }, k), h('strong', null, v || '—'));
+  const pill = calf.status === 'dead' ? h('span', { class: 'pill dead' }, `Dead · ${calf.death.cause || ''}`)
+    : calf.status === 'sold' ? h('span', { class: 'pill' }, 'Sold')
+      : h('span', { class: 'pill alive' }, calf.pasture ? `${calf.pasture}${calf.pastureUnconfirmed ? '?' : ''}` : 'Alive');
+
+  // The story, oldest first. Purchase comes from the processing group.
+  const tagMoves = state.all.filter((e) => e.kind === 'move' && (e.tags || []).map(cleanTagNum).includes(n));
+  const evs = [...calf.events, ...tagMoves].sort((a, b2) => a.at - b2.at);
+  const story = [];
+  if (b) {
+    story.push(h('div', { class: 'entry life' },
+      h('div', { class: 'entry-top' }, h('strong', null, `🧾 Bought${originLabel(b) ? ' · ' + originLabel(b) : ''}`), h('span', { class: 'muted small' }, b.purchaseDate ? dateLabel(b.purchaseDate) : 'date not entered')),
+      h('div', { class: 'muted small' }, b.invoice ? `Invoice ${b.invoice}` : 'No invoice # yet')));
+  }
+  story.push(...evs.map((e) => lifeRow(e, { showTag: false })));
+
+  el.replaceChildren(
+    h('section', { class: 'card' },
+      h('div', { class: 'tag-summary' }, h('div', { class: 'big-tag' }, seasonTag(n)), pill),
+      calf.pastureUnconfirmed ? h('p', { class: 'muted small' }, `Last seen in ${calf.pasture}, but cattle have moved out of there by head count since. It may be somewhere else.`) : null,
+      h('div', { class: 'facts' },
+        fact('Bought', b && b.purchaseDate ? dateLabel(b.purchaseDate) + (daysSince !== null ? ` (${daysSince} days ago)` : '') : ''),
+        fact('From', originLabel(b)),
+        fact('Processed', calf.processedAt ? fmtDay(calf.processedAt) : ''),
+        fact('Arrival weight', calf.arrivalWeight ? fmtLb(calf.arrivalWeight) : ''),
+        fact('Latest weight', calf.weights.length > 1 ? `${fmtLb(last.weight)} · ${fmtDay(last.at)}` : ''),
+        fact('Gain since arrival', fmtAdg(calf.gain.sinceArrival)),
+        fact('Gain since last weight', fmtAdg(calf.gain.sinceLast)),
+        fact('Times pulled', String(calf.pulls.length)),
+        calf.massTreatments.length ? fact('Treated at processing / mass', calf.massTreatments.map((m) => `${m.treatment} ${fmtDay(m.at)}`).join(', ')) : null),
+      calf.status === 'alive' ? actions : null),
+    h('section', { class: 'card' },
+      h('label', { class: 'lbl' }, 'History'),
+      h('div', { class: 'list' }, story)));
+}
+
+// ---------- pastures: feed and head counts ----------
+function renderPastures(main) {
+  main.append(seg([['feed', '🌾 Feed'], ['counts', '🔢 Head counts']], state.pastureView, (k) => { state.pastureView = k; render(); }));
+  if (!pastures().length) {
+    main.append(h('section', { class: 'card' }, h('p', null, 'No pastures set up yet.'),
+      h('p', { class: 'muted small' }, isAdmin() ? 'Add them under More → Settings → Pastures.' : 'Ask Christian to add them.')));
+    return;
+  }
+  if (state.pastureView === 'counts') renderCounts(main);
+  else renderFeed(main);
+}
+
+function renderFeed(main) {
+  const cnt = counts();
+  const today = startOfDay(Date.now());
+  const feeds = state.all.filter((e) => e.kind === 'feed');
+  const todays = feeds.filter((e) => e.at >= today).sort((a, b) => b.at - a.at);
+  const fedToday = new Map();
+  for (const f of todays) fedToday.set(f.pasture, (fedToday.get(f.pasture) || 0) + (Number(f.lbs) || 0));
+  main.append(h('section', { class: 'card' },
+    h('label', { class: 'lbl' }, 'Tap a pasture after you feed it'),
+    h('div', { class: 'list' }, pastures().map((p) => {
+      const c = (cnt.get(p) || {}).count;
+      const lbs = fedToday.get(p);
+      return h('button', { class: 'entry pasture-btn' + (lbs ? ' fed' : ''), onclick: () => feedForm(p) },
+        h('div', { class: 'entry-top' }, h('strong', null, p), h('span', { class: 'small' }, c === null || c === undefined ? 'not counted' : `${c} head`)),
+        lbs ? h('div', { class: 'small fed-line' }, `✓ Fed today: ${lbs.toLocaleString()} lb`) : null);
+    }))));
+  main.append(h('section', { class: 'card' },
+    h('label', { class: 'lbl' }, `Fed today (${todays.length})`),
+    todays.length ? h('div', { class: 'list' }, todays.map(feedRow)) : h('p', { class: 'muted' }, 'Nothing yet today.'),
+    isAdmin() ? h('button', { class: 'btn', style: { marginTop: '12px' }, onclick: () => download(feedCSV(state.all, nameOf), 'feed') }, 'Download feed log (CSV)') : null));
+}
+
+function feedRow(f) {
+  const per = lbsPerHead(f);
+  const tap = canEdit(f) ? () => feedForm(f.pasture, f) : null;
+  return h(tap ? 'button' : 'div', { class: 'entry', onclick: tap || undefined },
+    h('div', { class: 'entry-top' }, h('strong', null, `${f.pasture} · ${Number(f.lbs).toLocaleString()} lb`), h('span', { class: 'muted small' }, fmtWhen(f.at), f._pending ? ' · ⏳' : '')),
+    h('div', { class: 'muted small' }, [
+      f.head ? `${f.head} head` : '', f.headMismatch ? `app had ${f.appHead}` : '', per ? `${per.toFixed(1)} lb/head` : '', nameOf(f.enteredBy),
+    ].filter(Boolean).join(' · ')));
+}
+
+function feedForm(pasture, existing, draft) {
+  const appHead = (counts().get(pasture) || {}).count;
+  const known = appHead !== null && appHead !== undefined;
+  const lbs = h('input', { class: 'input tagnum', id: 'feedLbs', inputmode: 'numeric', placeholder: 'Pounds fed', value: draft ? draft.lbs : existing ? String(existing.lbs) : '' });
+  const head = h('input', { class: 'input', id: 'feedHead', inputmode: 'numeric', placeholder: 'How many head are you feeding?', value: draft ? draft.head : existing && existing.head ? String(existing.head) : '' });
+  const doSave = (L, H) => {
+    const mismatch = headMismatch(known ? appHead : null, H);
+    const e = existing
+      ? { ...cleanEntry(existing), lbs: L, head: H, headMismatch: mismatch, editedBy: myEmail(), editedAt: Date.now() }
+      : newEntry('feed', { pasture, lbs: L, head: H, appHead: known ? appHead : null, headMismatch: mismatch });
+    put(e);
+    const per = lbsPerHead(e);
+    toast(`Saved ${L.toLocaleString()} lb for ${pasture}${per ? ` · ${per.toFixed(1)} lb/head` : ''}`);
+    setTimeout(render, 0);
+  };
+  const close = modal(`Feed · ${pasture}`, h('div', null,
+    h('label', { class: 'lbl' }, 'Pounds fed'), lbs,
+    h('label', { class: 'lbl' }, 'Head fed'), head,
+    h('p', { class: 'muted small' }, known ? `The app has ${appHead} head in ${pasture}.` : `${pasture} hasn't been counted in the app yet.`),
+    existing ? h('p', { class: 'muted small' }, `Entered by ${nameOf(existing.enteredBy)} · ${fmtWhen(existing.at)}`) : null), [
+    { label: existing ? 'Save changes' : 'Save', kind: 'primary', fn: () => {
+      const L = Number(lbs.value.replace(/[^\d.]/g, ''));
+      const H = head.value.trim() ? Number(head.value.replace(/\D/g, '')) : null;
+      if (!Number.isFinite(L) || L <= 0 || L > 200000) { toast('Enter the pounds fed'); return false; }
+      if (H !== null && (!Number.isFinite(H) || H <= 0)) { toast('Head count looks off'); return false; }
+      if (known && H !== null && headMismatch(appHead, H) && !(existing && existing.head === H)) {
+        setTimeout(() => modal('Double-check the head count', h('p', null, `You counted ${H} head. The app has ${appHead} in ${pasture}. Both numbers get saved either way.`), [
+          { label: `${H} is right · save`, kind: 'primary', fn: () => doSave(L, H) },
+          { label: 'Fix my count', fn: () => { setTimeout(() => feedForm(pasture, existing, { lbs: String(L), head: String(H) }), 0); } },
+        ]), 0);
+        return true;
+      }
+      doSave(L, H);
+    } },
+    existing && canEdit(existing) ? { label: 'Delete', kind: 'danger', fn: () => { drop(existing); toast('Deleted'); setTimeout(render, 0); } } : null,
+  ].filter(Boolean));
+  setTimeout(() => lbs.focus(), 50);
+  return close;
+}
+
+function renderCounts(main) {
+  const cnt = counts();
+  const admin = isAdmin();
+  main.append(h('section', { class: 'card' },
+    h('label', { class: 'lbl' }, 'Head per pasture'),
+    h('div', { class: 'list' }, pastures().map((p) => {
+      const c = cnt.get(p) || {};
+      return h('div', { class: 'count-row' },
+        h('div', null, h('strong', null, p), h('div', { class: 'muted small' }, c.updatedAt ? `updated ${fmtWhen(c.updatedAt)}` : 'not counted yet')),
+        h('div', { class: 'row' }, h('span', { class: 'count-n' }, c.count === null || c.count === undefined ? '—' : c.count),
+          admin ? h('button', { class: 'btn small', onclick: () => setCount(p, c.count) }, 'Set') : null));
+    })),
+    h('p', { class: 'muted small' }, 'Counts change on their own when calves are processed into a pasture, moved, or found dead there.',
+      admin ? '' : ' Only admins can set counts or move cattle.')));
+  if (admin) renderTransfer(main, cnt);
+  const hist = state.all.filter((e) => e.kind === 'move' || e.kind === 'count').sort((a, b) => b.at - a.at);
+  main.append(h('section', { class: 'card' },
+    h('label', { class: 'lbl' }, 'Recent changes'),
+    hist.length ? h('div', { class: 'list' }, hist.slice(0, 25).map((e) => h('div', { class: 'count-row' },
+      h('div', null,
+        h('strong', null, e.kind === 'count' ? `${e.pasture}: counted ${e.count}` : `${e.count} head · ${e.from} → ${e.to}`),
+        h('div', { class: 'muted small' }, [fmtWhen(e.at), nameOf(e.enteredBy), e.tags && e.tags.length ? `tags ${e.tags.join(', ')}` : ''].filter(Boolean).join(' · '))),
+      admin ? h('button', { class: 'btn small ghost', onclick: () => modal('Delete this change?', h('p', null, 'The head counts will be worked out again without it.'), [
+        { label: 'Delete', kind: 'danger', fn: () => { drop(e); setTimeout(render, 0); } }]) }, '✕') : null)))
+      : h('p', { class: 'muted' }, 'No counts or transfers yet.'),
+    admin && hist.length ? h('button', { class: 'btn', style: { marginTop: '12px' }, onclick: () => download(ledgerCSV(state.all, nameOf), 'head-counts') }, 'Download (CSV)') : null));
+}
+
+function setCount(pasture, current) {
+  const n = h('input', { class: 'input tagnum', inputmode: 'numeric', placeholder: 'Head', value: current === null || current === undefined ? '' : String(current) });
+  modal(`Head count · ${pasture}`, h('div', null, h('p', { class: 'muted small' }, 'How many head are in this pasture right now?'), n), [
+    { label: 'Save', kind: 'primary', fn: () => {
+      const v = Number(n.value.replace(/\D/g, ''));
+      if (n.value.trim() === '' || !Number.isFinite(v)) { toast('Enter a number'); return false; }
+      put(newEntry('count', { pasture, count: v }));
+      toast(`${pasture}: ${v} head`);
+      setTimeout(render, 0);
+    } },
+  ]);
+  setTimeout(() => n.focus(), 50);
+}
+
+function renderTransfer(main, cnt) {
+  const x = state.xfer || (state.xfer = { from: '', to: '', mode: 'count', n: '', tagText: '' });
+  const nIn = h('input', { class: 'input tagnum', inputmode: 'numeric', placeholder: 'Number of head', value: x.n, oninput: () => { x.n = nIn.value.replace(/\D/g, ''); } });
+  const tagsIn = h('textarea', { class: 'input', rows: 2, placeholder: 'e.g. 123, 456 or 120-135' });
+  tagsIn.value = x.tagText;
+  tagsIn.addEventListener('input', () => { x.tagText = tagsIn.value; });
+  const fromC = x.from ? (cnt.get(x.from) || {}).count : null;
+  main.append(h('section', { class: 'card' },
+    h('label', { class: 'lbl' }, 'Move cattle (admin)'),
+    h('label', { class: 'lbl' }, 'From'), pastureSelect(x.from, (v) => { x.from = v; render(); }),
+    x.from ? h('p', { class: 'muted small' }, fromC === null || fromC === undefined ? `${x.from} hasn't been counted.` : `${fromC} head in ${x.from} now.`) : null,
+    h('label', { class: 'lbl' }, 'To'), pastureSelect(x.to, (v) => { x.to = v; }, 'Pick a pasture…', [OUT_PASTURE]),
+    seg([['count', 'Number of head'], ['tags', 'Specific tags']], x.mode, (k) => { x.mode = k; render(); }),
+    x.mode === 'count' ? nIn : tagsIn,
+    h('button', { class: 'btn save', onclick: () => doTransfer(cnt) }, 'Move')));
+}
+
+function doTransfer(cnt) {
+  const x = state.xfer;
+  if (!x.from || !x.to) return toast('Pick both pastures');
+  if (x.from === x.to) return toast('From and To are the same');
+  let n;
+  let tags = [];
+  if (x.mode === 'tags') {
+    const r = parseTagList(x.tagText);
+    if (r.bad.length) return toast(`Couldn't read: ${r.bad.join(', ')}`);
+    tags = r.tags;
+    n = tags.length;
+  } else n = Number(x.n);
+  if (!n || n < 1) return toast(x.mode === 'tags' ? 'Enter the tag numbers' : 'Enter the number of head');
+  const have = (cnt.get(x.from) || {}).count;
+  const go = () => {
+    put(newEntry('move', { from: x.from, to: x.to, count: n, tags }));
+    toast(`Moved ${n} head · ${x.from} → ${x.to}`);
+    state.xfer = { from: x.from, to: '', mode: x.mode, n: '', tagText: '' };
+    setTimeout(render, 0);
+  };
+  if (have !== null && have !== undefined && n > have) {
+    modal('More than the count', h('p', null, `The app only has ${have} head in ${x.from}. Moving ${n} takes it to 0 and puts ${n} in ${x.to}.`), [
+      { label: 'Move anyway', kind: 'primary', fn: go }]);
+    return;
+  }
+  go();
+}
+
+function download(text, what) {
+  const blob = new Blob([text], { type: 'text/csv' });
+  const a = h('a', { href: URL.createObjectURL(blob), download: `calf-doctor-${what}-${state.practice ? 'PRACTICE-' : ''}${season()}-${dayKey(Date.now())}.csv` });
+  document.body.append(a);
+  a.click();
+  a.remove();
+}
+
+// ---------- reports: weight gain and feed ----------
+function renderGainReports(main) {
+  const g = gainReport(state.calves, nameOf);
+  const fr = feedReport(state.all, rangeFor(state.reportRange));
+  main.append(h('section', { class: 'card' },
+    h('label', { class: 'lbl' }, 'Weight gain (whole season)'),
+    g.calves
+      ? h('p', null, h('strong', null, fmtAdg(g.adg)), ` average since arrival, across ${g.calves} calves with 2 or more weights.`)
+      : h('p', { class: 'muted' }, 'Shows up once calves have a second weight (reimplant, sale, or a scale file).'),
+    g.calves ? Object.entries(g.groups).map(([title, rows]) => h('div', { class: 'gain-group' },
+      h('div', { class: 'small', style: { fontWeight: 800, margin: '10px 0 4px' } }, title),
+      h('div', { class: 'table-wrap' }, h('table', null,
+        h('thead', null, h('tr', null, ['', 'Calves', 'Lb/day', 'Arrival wt'].map((c) => h('th', null, c)))),
+        h('tbody', null, rows.map((r) => h('tr', null, h('td', null, r.key), h('td', null, r.calves), h('td', null, r.adg.toFixed(2)), h('td', null, fmtLb(r.arrivalWeight))))))))) : null,
+    h('p', { class: 'muted small' }, 'Lb/day is from the first weight to the latest one. Small groups swing a lot; look for big groups that differ.'),
+    h('button', { class: 'btn', onclick: () => download(calfCSV(state.calves, nameOf), 'calves') }, 'Download one row per calf (CSV)')));
+  if (fr.size) {
+    main.append(h('section', { class: 'card' },
+      h('label', { class: 'lbl' }, 'Feed by pasture'),
+      h('div', { class: 'table-wrap' }, h('table', null,
+        h('thead', null, h('tr', null, ['Pasture', 'Lbs fed', 'Feedings', 'Lb/head per feeding'].map((c) => h('th', null, c)))),
+        h('tbody', null, [...fr.entries()].sort((a, b) => b[1].lbs - a[1].lbs).map(([p, r]) => h('tr', null,
+          h('td', null, p), h('td', null, Math.round(r.lbs).toLocaleString()), h('td', null, r.loads), h('td', null, r.headDays ? (r.lbs / r.headDays).toFixed(1) : '—'))))))));
+  }
 }
 
 // ---------- boot ----------
@@ -1259,7 +2239,9 @@ export function boot(createStore) {
         if (badge) badge.replaceWith(syncBadge());
         return;
       }
-      if (state.view === 'more' && document.activeElement && /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) return;
+      // Don't wipe a half-typed form on the other screens either.
+      if (state.view !== 'doctor' && document.activeElement && /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) return;
+      if (document.querySelector('.modal-wrap')) return;
       render();
     });
   };

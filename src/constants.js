@@ -79,3 +79,14 @@ export const COLOR_ALIASES = {
   black: ['black'], gray: ['gray', 'grey'], brown: ['brown'], lime: ['lime'],
   teal: ['teal'], tan: ['tan'],
 };
+
+// ---- Calf lifecycle (Nov 18, 2026 call) ----
+// Defaults; admins can change these lists under More → Settings.
+export const ORIGINS = ['Riverton', 'Worland', 'Torrington', 'Buffalo', 'Bowman', 'Billings', 'Brush', 'Crawford', 'Butte', 'Twin Falls', 'Fallon', 'Other'];
+export const IMPLANT_PRODUCTS = ['Rev G', 'Synovex'];
+// Processing: temp the first head; if more than half are over this, mass treat the rest.
+export const MASS_TEMP = 104.0;
+export const MASS_SWITCH_SHARE = 0.5;
+// Transfers to this "pasture" take cattle off the place (sold or shipped).
+export const OUT_PASTURE = 'Sold / shipped';
+export const WEIGH_STAGES = ['Arrival', 'Reimplant', 'Sale', 'Other'];

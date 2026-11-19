@@ -1,6 +1,6 @@
 # Calf Doctor
 
-Doctoring log for Christian Peterson's crew. Cowboys sign in with Google or with any email address and a password, log pulls at the chute by voice or by tapping, and the app checks the treatment protocol and builds per-cowboy reports.
+Doctoring log and calf lifecycle tracker for Christian Peterson's crew. Cowboys sign in with Google or with any email address and a password, log pulls at the chute by voice or by tapping, and the app checks the treatment protocol and builds per-cowboy reports.
 
 - Works on iPhone and Android in the browser, and installs to the home screen.
 - Works offline: entries save on the phone and sync when signal comes back. Photos and videos wait on the phone and upload when there's signal.
@@ -16,6 +16,7 @@ Doctoring log for Christian Peterson's crew. Cowboys sign in with Google or with
 | `src/constants.js` | Diagnoses, treatments, causes, voice nicknames |
 | `src/protocol.js` | Protocol suggestions (DRAFT until Christian's written protocol) |
 | `src/reports.js` | Report math and CSV export |
+| `src/herd.js` | Calf lifecycle: calf history, weight gain, pasture head counts, feed, scale-file import |
 | `firestore.rules` | Security rules: paste into Firebase console → Firestore → Rules |
 | `storage.rules` | Photo/video rules: paste into Firebase console → Storage → Rules |
 | `src/media.js` | Photo/video queue: waits on the phone with no signal, uploads later |
@@ -37,13 +38,19 @@ npm run build
 4. GitHub repo → Settings → Pages → Deploy from branch `main`, folder `/docs`.
 5. Open the app, sign in as the owner, and add the crew under More → Crew.
 6. For death-report photos and videos: switch the project to the pay-as-you-go Blaze plan (Firebase requires it for Storage) and set a budget alert, then Storage → Get started, pick a US region (us-west1 or us-central1 keep the free allowance), paste `storage.rules` into the Rules tab and Publish. Until this is done, photos stay queued on the phone and the rest of the entry saves normally.
-7. Under More → Settings, an admin fills in pastures, herds and the dose for each drug.
+7. Under More → Settings, an admin fills in pastures, herds, purchase origins, implant products and the dose for each drug.
 
 ## Data model
 
 - `crew/{email}`: `{ name, role: 'admin' | 'cowboy', active }`
 - `settings/main`: `{ season, locations[] (pastures), herds[], dosages{treatment: text}, tagColors[{color, year}], extraAliases{nickname: treatment} }`
 - `entries/{id}`: one pull or death: tag number (calves are matched by tag number within the season; each season has one tag color set by an admin in Settings (`settings.seasonColor`) and saved on every entry; cowboys don't pick it; older entries with a hand-picked color still match by number), or `noTag`, diagnosis, temperature, treatment and the dose shown at the time, or cause + herd for deaths, pulled by, entered by, pasture pulled from (`location`), GPS, time, notes/description, `media[{path, type, size}]`, protocol warnings shown, `practice` (true for entries saved in practice mode; these are kept out of real reports, lookup and protocol history).
+- Lifecycle events live in the same `entries` collection (so offline sync, practice mode and the security rules apply unchanged), each with `kind`:
+  - `batch`: a processing group (`batchType: 'processing'`, purchase date, origin, invoice #, pasture they go to, mass-treatment drug) or a mass treatment of calves already here (`batchType: 'mass'`). Admins can fill in the purchase date and invoice # later.
+  - `process`: one calf in a batch: tag, weight, temp, treatment given. Never counted as doctoring or credited to a cowboy; a later pull still counts as the first treatment.
+  - `implant` (implant/reimplant, product, weight), `weigh` (weight, stage, `source: 'chute' | 'import' | 'manual'`), `sale` (final weight, collar removed).
+  - `count` (admin sets a pasture's head count), `move` (head moved from one pasture to another, by number or by tags; `to: 'Sold / shipped'` takes them off the place), `feed` (pasture, lbs, the driver's head count and the app's count at the time).
+  - Pasture head counts are worked out from these: counts set, moves, calves processed into a pasture, deaths found there.
 - Storage `entries/{id}/…`: photos (shrunk to 1600 px on the phone) and videos for death reports.
 
 ## Costs

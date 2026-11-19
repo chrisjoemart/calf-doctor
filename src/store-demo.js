@@ -4,7 +4,7 @@ import { HR_STEPS, CNT } from './constants.js';
 import { hrIndex } from './protocol.js';
 import { idbPut, idbGet, idbDel, KEEP_STORE } from './media.js';
 
-const KEY = 'calfdoctor-demo-v3';
+const KEY = 'calfdoctor-demo-v4';
 
 const CREW = [
   { email: 'christian@example.com', name: 'Christian Peterson', role: 'admin', active: true },
@@ -75,7 +75,53 @@ function seed() {
       history.set(key, [...prev, e]);
     }
   }
+  seedLifecycle({ season, settings, entries, rnd, today });
   return { crew: CREW, settings, entries };
+}
+
+// Two groups processed about 75 days ago, a reimplant 15 days ago, head counts and feeding.
+function seedLifecycle({ season, settings, entries, rnd, today }) {
+  const D = 86400000;
+  const iso = (ms) => new Date(ms).toISOString().slice(0, 10);
+  const by = 'christian@example.com';
+  const base = (kind, at, extra) => ({ id: uid() + Math.floor(rnd() * 1e6), season, kind, at, enteredBy: by, notes: '', ...extra });
+  const calf = (kind, num, at, extra) => base(kind, at, { noTag: false, tagNum: String(num), tagColor: 'white', tagKey: tagKey(season, num), ...extra });
+  const groups = [
+    { from: 1, to: 450, origin: 'Riverton', pasture: 'North pens', bought: 78, processed: 76, invoice: 'R-20431', all: true, gain: 2.3 },
+    { from: 451, to: 900, origin: 'Billings', pasture: 'River lot', bought: 74, processed: 72, invoice: '', all: false, gain: 2.0 },
+  ];
+  const arrival = new Map();
+  for (const g of groups) {
+    const at = today - g.processed * D + 8 * 3600000;
+    const b = base('batch', at, { batchType: 'processing', purchaseDate: iso(today - g.bought * D), origin: g.origin, originOther: '', invoice: g.invoice, pasture: g.pasture, drug: 'HR1 Draxxin', dose: '', treatAll: g.all });
+    entries.push(b);
+    for (let n = g.from; n <= g.to; n++) {
+      const weight = Math.round(420 + rnd() * 140);
+      const temp = !g.all && n - g.from < 20 ? Math.round((102.4 + rnd() * 3) * 10) / 10 : null;
+      const treated = g.all || (temp !== null && temp > 104) ;
+      entries.push(calf('process', n, at + (n - g.from) * 25000, { batchId: b.id, weight, temp, treatment: treated ? 'HR1 Draxxin' : '', dose: '' }));
+      arrival.set(n, { weight, g });
+    }
+  }
+  // Reimplant with weights for the first 300 of each group.
+  for (const g of groups) {
+    for (let n = g.from; n < g.from + 300; n++) {
+      const a = arrival.get(n);
+      const product = n % 2 ? 'Rev G' : 'Synovex';
+      const days = g.processed - 15;
+      const adg = g.gain + (product === 'Rev G' ? 0.15 : 0) + (rnd() - 0.5) * 0.8;
+      entries.push(calf('implant', n, today - 15 * D + 9 * 3600000 + (n - g.from) * 30000, { which: 'Reimplant', product, weight: Math.round(a.weight + adg * days) }));
+    }
+  }
+  const pastures = settings.locations;
+  entries.push(base('count', today - 20 * D, { pasture: 'East pasture', count: 120 }));
+  entries.push(base('move', today - 10 * D, { from: 'North pens', to: 'East pasture', count: 60, tags: [] }));
+  for (let d = 3; d >= 1; d--) {
+    for (const p of pastures) {
+      if (p === 'Home chute') continue;
+      entries.push(base('feed', today - d * D + 7 * 3600000, { enteredBy: 'luke@example.com', pasture: p, lbs: 2000 + Math.round(rnd() * 20) * 100, head: null, appHead: null, headMismatch: false }));
+    }
+  }
 }
 
 export function createStore() {

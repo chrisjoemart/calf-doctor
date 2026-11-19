@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node test/parse.test.mjs",
+    "test": "node test/parse.test.mjs && node test/herd.test.mjs",
     "build": "node scripts/build.mjs"
   },
   "keywords": [],
