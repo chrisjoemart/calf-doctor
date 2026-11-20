@@ -15,7 +15,7 @@ import {
   gainReport, feedReport, calfCSV, feedCSV, ledgerCSV, parseCSV, guessColumns, readWeights,
 } from './herd.js';
 
-const VERSION = '0.6.0';
+const VERSION = '0.6.1';
 
 let store;
 const state = {
@@ -75,8 +75,28 @@ function setPractice(on) {
 function practiceBar() {
   if (!state.practice) return null;
   return h('div', { class: 'practice-bar' },
-    h('span', null, h('strong', null, 'PRACTICE MODE'), ' · entries won\'t count'),
-    h('button', { class: 'link', onclick: () => setPractice(false) }, 'Turn off'));
+    h('span', null, h('strong', null, '⚠ PRACTICE MODE'), h('br'), 'Nothing you save counts for real.'),
+    h('button', { class: 'btn practice-off', onclick: () => setPractice(false) }, 'Switch to real'));
+}
+// Ask "still practicing?" when the app opens, and when it comes back after sitting a while,
+// so nobody does a real day's work in practice mode without knowing.
+let practiceCheckDue = true;
+let hiddenAt = 0;
+const PRACTICE_RECHECK_MS = 20 * 60000;
+function practiceCheck() {
+  practiceCheckDue = false;
+  modal('You\'re in PRACTICE mode', h('div', null,
+    h('p', null, 'Nothing you save right now counts. It stays out of the real records, head counts and reports.'),
+    h('p', { class: 'small muted' }, 'Doing real work? Switch to real before you save anything.')), [
+    { label: 'Switch to real', kind: 'primary', fn: () => setPractice(false) },
+  ], 'Keep practicing');
+}
+function turnOnPractice() {
+  modal('Turn on practice mode?', h('div', null,
+    h('p', null, 'Everything you save will be marked PRACTICE and won\'t count: not in the real records, head counts, lookup or reports.'),
+    h('p', { class: 'small muted' }, 'Only for trying the app out or training someone. Turn it back off before doing real work.')), [
+    { label: 'Turn on practice', kind: 'primary', fn: () => { practiceCheckDue = false; setPractice(true); } },
+  ]);
 }
 let stopListening = null;
 // Things to run once the screen is drawn (focusing the next box at the chute).
@@ -181,6 +201,7 @@ function movedWarning() {
 // ---------- toasts & modals ----------
 function toast(msg, action) {
   const t = document.getElementById('toast');
+  if (state.practice && /^Saved/.test(msg)) msg = 'PRACTICE · ' + msg + ' (won\'t count)';
   const btn = action ? h('button', { class: 'toast-btn', onclick: () => { t.classList.remove('show'); action.fn(); } }, action.label) : null;
   t.replaceChildren(...[h('span', null, msg), btn].filter(Boolean));
   t.onclick = (e) => { if (e.target === t || e.target.tagName === 'SPAN') t.classList.remove('show'); };
@@ -189,7 +210,7 @@ function toast(msg, action) {
   toast._t = setTimeout(() => t.classList.remove('show'), 3000);
 }
 
-function modal(title, body, actions = []) {
+function modal(title, body, actions = [], cancelLabel = 'Cancel') {
   const close = () => wrap.remove();
   const wrap = h('div', { class: 'modal-wrap', onclick: (e) => { if (e.target === wrap) close(); } },
     h('div', { class: 'modal' },
@@ -197,7 +218,7 @@ function modal(title, body, actions = []) {
       body,
       h('div', { class: 'modal-actions' },
         actions.map((a) => h('button', { class: 'btn ' + (a.kind || ''), onclick: () => { if (a.fn() !== false) close(); } }, a.label)),
-        h('button', { class: 'btn ghost', onclick: close }, 'Cancel'))));
+        h('button', { class: 'btn ghost', onclick: close }, cancelLabel))));
   document.body.append(wrap);
   return close;
 }
@@ -252,13 +273,15 @@ function render() {
     [['doctor', '💉', 'Doctor'], ['chute', '🐂', 'Chute'], ['pastures', '🌾', 'Pastures'], ['lookup', '🔎', 'Lookup'], ['reports', '📊', 'Reports'], ['more', '☰', 'More']].map(([v, icon, label]) =>
       h('button', { class: 'tab' + (state.view === v ? ' on' : ''), onclick: () => { state.view = v; stopVoice(); render(); window.scrollTo(0, 0); } },
         h('span', { class: 'tab-icon' }, icon), h('span', null, label))));
+  document.body.classList.toggle('practice', !!state.practice);
   const header = h('header', { class: 'top' },
-    h('div', { class: 'brand' }, 'Calf Doctor'),
+    h('div', { class: 'brand' }, state.practice ? '⚠ PRACTICE' : 'Calf Doctor'),
     syncBadge());
   root.replaceChildren(...[header, store.mode === 'demo' ? h('div', { class: 'demo-bar' }, `Demo: data stays on this device. Signed in as ${nameOf(myEmail())}.`) : null, practiceBar(), main, nav].filter(Boolean));
   if (state.error) main.append(h('div', { class: 'warn' }, state.error));
   ({ doctor: renderDoctor, chute: renderChute, pastures: renderPastures, lookup: renderLookup, reports: renderReports, more: renderMore })[state.view](main);
   afterRender.splice(0).forEach((fn) => fn());
+  if (state.practice && practiceCheckDue && state.access === 'ok' && !document.querySelector('.modal-wrap')) practiceCheck();
 }
 
 const AUTH_ERRORS = {
@@ -452,7 +475,7 @@ function renderDoctor(main) {
     if (state.lastSaved && Date.now() - state.lastSaved.at < 10 * 60000) {
       const ls = state.lastSaved;
       main.append(h('div', { class: 'saved-bar' },
-        h('span', null, '✓ Saved ', h('strong', null, ls.summary)),
+        h('span', null, state.practice ? '✓ Saved as PRACTICE ' : '✓ Saved ', h('strong', null, ls.summary)),
         h('button', { class: 'link', onclick: () => { const e = state.entries.find((x) => x.id === ls.id); if (e) startEdit(e); } }, 'Edit')));
     }
   }
@@ -1051,7 +1074,9 @@ function renderMore(main) {
     h('p', { class: 'small' }, state.practice
       ? 'On. Everything you save is marked practice and stays out of the real records, reports and tag lookup.'
       : 'For trying the app out or training someone. Practice entries stay out of the real records, reports and tag lookup.'),
-    h('button', { class: 'btn' + (state.practice ? '' : ' primary'), onclick: () => setPractice(!state.practice) }, state.practice ? 'Turn off practice mode' : 'Turn on practice mode')));
+    state.practice
+      ? h('button', { class: 'btn primary', onclick: () => setPractice(false) }, 'Turn off practice mode')
+      : h('button', { class: 'btn', onclick: turnOnPractice }, 'Turn on practice mode')));
 
   main.append(h('section', { class: 'card' }, doseChart(true)));
 
@@ -1087,6 +1112,8 @@ function renderPracticeAdmin() {
   return h('section', { class: 'card' },
     h('label', { class: 'lbl' }, 'Practice data (admin)'),
     h('p', null, `${real.length} real entries · ${practice.length} practice entries`),
+    practice.length ? practiceToReal(practice) : null,
+    h('hr', { class: 'sep' }),
     h('p', { class: 'small' }, 'Clean up testing from before practice mode existed: move every real entry from before this date to practice.'),
     h('div', { class: 'row' }, dateIn,
       h('button', { class: 'btn', onclick: () => {
@@ -1110,6 +1137,67 @@ function renderPracticeAdmin() {
         } },
       ]);
     } }, `Delete all ${practice.length} practice entries`) : null);
+}
+
+const KIND_WORDS = {
+  pull: ['pull', 'pulls'], death: ['death', 'deaths'], batch: ['chute group', 'chute groups'], process: ['calf at the chute', 'calves at the chute'],
+  implant: ['implant', 'implants'], weigh: ['weight', 'weights'], sale: ['sale', 'sales'], count: ['head count', 'head counts'],
+  move: ['move', 'moves'], feed: ['feed load', 'feed loads'],
+};
+function kindSummary(list) {
+  const n = {};
+  list.forEach((e) => { const k = e.kind || 'pull'; n[k] = (n[k] || 0) + 1; });
+  return Object.entries(n).map(([k, c]) => { const w = KIND_WORDS[k] || [k, k + 's']; return `${c} ${c === 1 ? w[0] : w[1]}`; }).join(', ');
+}
+// Someone did real work in practice mode: move their practice entries into the real records.
+function practiceToReal(practice) {
+  const people = new Map();
+  practice.forEach((e) => [e.enteredBy, e.pulledBy].filter(Boolean).forEach((p) => people.set(p, (people.get(p) || 0) + 1)));
+  const who = h('select', { class: 'input', onchange: () => show() },
+    h('option', { value: '' }, 'Everyone'),
+    [...people.entries()].sort((a, b) => b[1] - a[1]).map(([p, c]) => h('option', { value: p }, `${nameOf(p)} (${c})`)));
+  const from = h('input', { class: 'input', type: 'date', value: dayKey(Date.now()), onchange: () => show() });
+  const to = h('input', { class: 'input', type: 'date', value: dayKey(Date.now()), onchange: () => show() });
+  const preview = h('p', { class: 'small' });
+  const pick = () => {
+    const a = new Date(from.value + 'T00:00').getTime();
+    const b = new Date(to.value + 'T00:00').getTime() + 86400000;
+    if (!Number.isFinite(a) || !Number.isFinite(b)) return [];
+    const list = practice.filter((e) => e.at >= a && e.at < b && (!who.value || e.enteredBy === who.value || e.pulledBy === who.value));
+    // Bring along the chute group a calf belongs to, so purchase date, origin and drug come with it.
+    const ids = new Set(list.map((e) => e.id));
+    list.filter((e) => e.batchId && !ids.has(e.batchId)).forEach((e) => {
+      const g = practice.find((x) => x.id === e.batchId);
+      if (g) { ids.add(g.id); list.push(g); }
+    });
+    return list;
+  };
+  const show = () => {
+    const list = pick();
+    preview.replaceChildren(list.length ? h('span', null, h('strong', null, `${list.length} entries: `), kindSummary(list)) : 'No practice entries for that person and dates.');
+  };
+  const flip = (list, practiceFlag) => Promise.all(list.map((e) => store.saveEntry({ ...cleanEntry(e), practice: practiceFlag })));
+  show();
+  return h('div', { class: 'practice-recover' },
+    h('p', null, h('strong', null, 'Move practice entries to real')),
+    h('p', { class: 'small' }, 'If someone did real work in practice mode by mistake, pick them and the days, check the count, then move it into the real records.'),
+    who,
+    h('div', { class: 'dates' }, h('label', null, h('span', { class: 'small' }, 'From'), from), h('label', null, h('span', { class: 'small' }, 'To'), to)),
+    preview,
+    h('button', { class: 'btn primary', onclick: () => {
+      const list = pick();
+      if (!list.length) { toast('Nothing to move'); return; }
+      modal(`Move ${list.length} entries to real?`, h('div', null,
+        h('p', null, `${who.value ? nameOf(who.value) : 'Everyone'}, ${fmtDay(new Date(from.value + 'T00:00').getTime())}${from.value === to.value ? '' : ' to ' + fmtDay(new Date(to.value + 'T00:00').getTime())}:`),
+        h('p', null, kindSummary(list)),
+        h('p', { class: 'small muted' }, 'They\'ll show up in the real records, calf lookup, head counts and reports, with the original names and times.')), [
+        { label: 'Move to real', kind: 'primary', fn: () => {
+          flip(list, false)
+            .then(() => toast(`Moved ${list.length} entries to real`, { label: 'Undo', fn: () => flip(list, true).then(() => toast('Put back in practice')) }))
+            .catch((err) => toast('Couldn\'t move them all: ' + (err.code || err.message)));
+        } },
+      ]);
+    } }, 'Move to real…'));
 }
 
 // Deletes an entry and its photos/videos.
@@ -2223,6 +2311,8 @@ export function boot(createStore) {
   window.addEventListener('offline', () => { state.online = false; render(); });
   // Coming back from the email app after tapping the confirm link: check automatically.
   document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') hiddenAt = Date.now();
+    if (document.visibilityState === 'visible' && state.practice && hiddenAt && Date.now() - hiddenAt > PRACTICE_RECHECK_MS) { practiceCheckDue = true; render(); }
     if (document.visibilityState === 'visible' && state.access === 'verify' && verifyCheck) verifyCheck();
     if (document.visibilityState === 'visible' && state.access === 'ok') { captureGPS(); if (uploader) uploader.drain(); }
   });
